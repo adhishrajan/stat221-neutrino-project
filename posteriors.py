@@ -40,7 +40,7 @@ def poisson_log_likelihood(counts, mu) -> float:
 def log_prior_base(phi, gamma, eta, delta, prior_type = "flat") -> float:
     """
     log prior for (phi, gamma, eta, delta).
-    prior_type can be 'flat', 'weakly', 'jeffreys', 'lognormal_gamma'
+    prior_type can be 'flat', 'weakly', 'lognormal_gamma'
     'flat' gives improper flat priors on all,
     'weakly' is log normal on phi/eta, normal on gamma, normal on delta
     all versions have delta = N(3.7, 0.1^2)
@@ -70,7 +70,8 @@ def log_prior_base(phi, gamma, eta, delta, prior_type = "flat") -> float:
         if gamma <= 0:
             return -np.inf
         lp += -0.5 * ((np.log(gamma) - np.log(2.5)) / 0.2)**2 - np.log(gamma)
-        #others flat
+        #others flat        
+    
     else:
         raise ValueError(f"Unknown prior type: {prior_type}")
 
@@ -113,7 +114,8 @@ def log_posterior_base(theta_transformed, counts, E, E_widths, prior_type = "wea
 
 
 # Analytic gradient in TRANSFORMED space
-
+# TO ADD: all the different prior_types!
+    
 def grad_log_posterior_base(theta_transformed, counts, E, E_widths, prior_type = "weakly") -> np.ndarray:
     """
     grad of log posterior wrt transformed parameters.
@@ -164,7 +166,11 @@ def grad_log_posterior_base(theta_transformed, counts, E, E_widths, prior_type =
     # delta prior
     grad[3] += -(delta_val - 3.7) / 0.1**2
 
-    if prior_type == "weakly":
+
+    if prior_type == "flat":
+        pass
+        
+    elif prior_type == "weakly":
         # phi = LogNormal(log(30), 1), d/d(log_phi) of logprior
         # log p(phi) = -0.5*((log(phi)-log(30))/1)^2 - log(phi)
         # d/d(log_phi) = -(log_phi - log(30))/1 - 1
@@ -174,13 +180,21 @@ def grad_log_posterior_base(theta_transformed, counts, E, E_widths, prior_type =
         # eta = LogNormal(log(500), 1)
         grad[2] += -(log_eta - np.log(500.0)) / 1.0**2 - 1.0
 
+    elif prior_type == "lognormal_gamma":
+        # log gamma = N(log 2.5, 0.2^2)
+        if gamma_val <= 0: # guards against gamma < 0 case
+            return np.zeros(4)
+        grad[1] += -((np.log(gamma_val) - np.log(2.5))/(0.2**2))*(1/gamma_val) - 1/gamma_val
+    
+    else:
+        raise ValueError(f"Unknown prior type: {prior_type}")
+
     # jacobian gradient
     # d/d(log_phi) of log(phi) = 1, same for log(eta)
     grad[0] += 1.0
     grad[2] += 1.0
 
     return grad
-
 
 # sanity just to verify the gradient
 
@@ -336,6 +350,11 @@ def log_posterior_hierarchical(theta, seasons, parameterization = "centered", pr
 
     return lp
 
+# TO ADD: computes analytic gradient for hierarchical model in transformed space, as defined for the theta vector
+#def log_posterior_hierarchical(theta, seasons, parameterization = "centered", prior_type = "weakly") -> np.ndarray:
+    
+
+# TO ADD: sanity check for gradient of hierarchical model
 
 # test
 if __name__ == "__main__":
@@ -355,11 +374,14 @@ if __name__ == "__main__":
         ds.true_params["delta"],
     ])
 
+    # Validating Weak Prior Case
+    print("WEAK PRIOR CASE")
     lp = log_posterior_base(theta_true, ds.counts, ds.E_centers, ds.E_widths, "weakly")
-    print(f"\nLog posterior at true params, {lp:.2f}")
+    print(f"Log posterior at true params, {lp:.2f}")
 
+    # weak prior gradient verification
     result = verify_gradient(theta_true, ds.counts, ds.E_centers, ds.E_widths, "weakly")
-    print(f"\nGradient verification.")
+    print(f"\nGradient verification at true params.")
     print(f"Analytic: {result['analytic']}")
     print(f"Numerical: {result['numerical']}")
     print(f"Abs diff: {result['abs_diff']}")
@@ -368,7 +390,52 @@ if __name__ == "__main__":
     theta_perturbed = theta_true + rng.normal(0, 0.1, size=4)
     result2 = verify_gradient(theta_perturbed, ds.counts, ds.E_centers, ds.E_widths, "weakly")
     print(f"\nGradient check at perturbed point.")
-    print(f"Max abs diff: {result2['max_abs_diff']:.2e}")
+    print(f"Analytic: {result2['analytic']}")
+    print(f"Numerical: {result2['numerical']}")
+    print(f"Abs diff: {result2['abs_diff']}")
+    print(f"Max abs diff: {result2['max_abs_diff']:.2e}\n\n")
+
+    # Validating Flat Prior Case
+    print("FLAT PRIOR CASE")
+    lp = log_posterior_base(theta_true, ds.counts, ds.E_centers, ds.E_widths, "flat")
+    print(f"Log posterior at true params, {lp:.2f}")
+    
+    # flat prior gradient verification
+    result = verify_gradient(theta_true, ds.counts, ds.E_centers, ds.E_widths, "flat")
+    print(f"\nGradient verification at true params.")
+    print(f"Analytic: {result['analytic']}")
+    print(f"Numerical: {result['numerical']}")
+    print(f"Abs diff: {result['abs_diff']}")
+    print(f"Max abs diff: {result['max_abs_diff']:.2e}")
+
+    theta_perturbed = theta_true + rng.normal(0, 0.1, size=4)
+    result2 = verify_gradient(theta_perturbed, ds.counts, ds.E_centers, ds.E_widths, "flat")
+    print(f"\nGradient check at perturbed point.")
+    print(f"Analytic: {result2['analytic']}")
+    print(f"Numerical: {result2['numerical']}")
+    print(f"Abs diff: {result2['abs_diff']}")
+    print(f"Max abs diff: {result2['max_abs_diff']:.2e}\n\n")
+
+    # Validating lognormal_gamma Prior Case
+    print("LOG NORMAL PRIOR CASE")
+    lp = log_posterior_base(theta_true, ds.counts, ds.E_centers, ds.E_widths, "lognormal_gamma")
+    print(f"Log posterior at true params, {lp:.2f}")
+    
+    # lognormal_gamma prior gradient verification
+    result = verify_gradient(theta_true, ds.counts, ds.E_centers, ds.E_widths, "lognormal_gamma")
+    print(f"\nGradient verification at true params.")
+    print(f"Analytic: {result['analytic']}")
+    print(f"Numerical: {result['numerical']}")
+    print(f"Abs diff: {result['abs_diff']}")
+    print(f"Max abs diff: {result['max_abs_diff']:.2e}")
+
+    theta_perturbed = theta_true + rng.normal(0, 0.1, size=4)
+    result2 = verify_gradient(theta_perturbed, ds.counts, ds.E_centers, ds.E_widths, "lognormal_gamma")
+    print(f"\nGradient check at perturbed point.")
+    print(f"Analytic: {result2['analytic']}")
+    print(f"Numerical: {result2['numerical']}")
+    print(f"Abs diff: {result2['abs_diff']}")
+    print(f"Max abs diff: {result2['max_abs_diff']:.2e}\n\n")
 
     # test hierarchical model
     print("HIERARCHICAL MODEL, log posterior eval")
