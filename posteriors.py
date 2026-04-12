@@ -284,7 +284,7 @@ def log_posterior_hierarchical(theta, seasons, parameterization = "centered", pr
     theta = parameter vector (len K + 5)
     seasons = list of K Dataset objects
     parameterization = 'centered'/'noncentered'
-    prior_type
+    prior_type: can be one of flat, weakly, lognormal_gamma
     """
     K = len(seasons)
 
@@ -333,11 +333,23 @@ def log_posterior_hierarchical(theta, seasons, parameterization = "centered", pr
     # delta =  N(3.7, 0.1^2)
     lp += -0.5 * ((delta_val - 3.7) / 0.1)**2
 
-    if prior_type == "weakly":
+    if prior_type == "flat":
+        pass
+    
+    elif prior_type == "weakly":
         # gamma = N(2.5, 0.5^2)
         lp += -0.5 * ((gamma_val - 2.5) / 0.5)**2
         # eta = LogNormal(log(500), 1)
         lp += -0.5 * ((np.log(eta) - np.log(500.0)) / 1.0)**2 - np.log(eta)
+
+    elif prior_type == "lognormal_gamma":
+        # gamma = LogNormal(log(2.5), 0.2^2)
+        if gamma_val <= 0:
+            return -np.inf
+        lp += -0.5 * ((np.log(gamma_val) - np.log(2.5)) / 0.2)**2 - np.log(gamma_val)
+
+    else:
+        raise ValueError(f"Unknown prior type: {prior_type}")
 
     # jacobians
     if parameterization == "centered":
@@ -350,11 +362,157 @@ def log_posterior_hierarchical(theta, seasons, parameterization = "centered", pr
 
     return lp
 
-# TO ADD: computes analytic gradient for hierarchical model in transformed space, as defined for the theta vector
-#def log_posterior_hierarchical(theta, seasons, parameterization = "centered", prior_type = "weakly") -> np.ndarray:
-    
+# computes analytic gradient for hierarchical model in transformed space, as defined for the theta vector
+def grad_log_posterior_hierarchical(theta, seasons, parameterization="centered", prior_type="weakly",) -> np.ndarray:
+    K = len(seasons)
 
-# TO ADD: sanity check for gradient of hierarchical model
+    if parameterization == "centered":
+        p = unpack_hierarchical_centered(theta, K)
+    elif parameterization == "noncentered":
+        p = unpack_hierarchical_noncentered(theta, K)
+    else:
+        raise ValueError(f"Unknown parameterization: {parameterization}")
+
+    phi_k = p["phi_k"]
+    log_phi_k = p["log_phi_k"]
+    gamma_val = p["gamma"]
+    eta = p["eta"]
+    log_eta = p["log_eta"]
+    delta_val = p["delta"]
+    mu_phi = p["mu_phi"]
+    sigma_phi = p["sigma_phi"]
+    log_sigma_phi = p["log_sigma_phi"]
+
+    if eta <= 0 or sigma_phi <= 0 or np.any(phi_k <= 0):
+        return np.zeros(K + 5)
+
+    grad = np.zeros(K + 5)
+
+    # Accumulators for shared parameters
+    d_gamma = 0.0
+    d_log_eta = 0.0
+    d_delta = 0.0
+
+    # These differ by parameterization, but it's convenient to accumulate them here
+    d_mu_phi_like = 0.0
+    d_log_sigma_like = 0.0
+
+    for k, ds in enumerate(seasons):
+        E_norm = ds.E_centers / E_REF
+        dE_norm = ds.E_widths / E_REF
+
+        mu_sig = phi_k[k] * E_norm**(-gamma_val) * dE_norm
+        mu_bg = eta * E_norm**(-delta_val) * dE_norm
+        mu = mu_sig + mu_bg
+
+        if np.any(mu <= 0):
+            return np.zeros(K + 5)
+
+        ratio = ds.counts / mu - 1.0
+
+        # Shared parameter gradients from likelihood
+        d_gamma += np.sum(ratio * (-mu_sig * np.log(E_norm)))
+        d_log_eta += np.sum(ratio * mu_bg)
+        d_delta += np.sum(ratio * (-mu_bg * np.log(E_norm)))
+
+        if parameterization == "centered":
+            # theta_k = log_phi_k
+            grad[k] = (
+                np.sum(ratio * mu_sig)
+                - (log_phi_k[k] - mu_phi) / sigma_phi**2
+                + 1.0  # Jacobian for phi_k = exp(log_phi_k)
+            )
+        else:
+            # theta_k = z_k, where log_phi_k = mu_phi + sigma_phi z_k
+            z_k = p["z_k"][k]
+            grad[k] = sigma_phi * np.sum(ratio * mu_sig) - z_k
+
+        # Contributions to hyperparameter gradients
+        if parameterization == "centered":
+            # no likelihood contribution to mu_phi or log_sigma_phi in centered coords
+            pass
+        else:
+            # non-centered: likelihood depends on mu_phi and sigma_phi through phi_k
+            z_k = p["z_k"][k]
+            d_mu_phi_like += np.sum(ratio * mu_sig)
+            d_log_sigma_like += sigma_phi * z_k * np.sum(ratio * mu_sig)
+
+    # Shared priors / Jacobians for shared params
+    grad[K] = d_gamma
+    grad[K + 1] = d_log_eta
+    grad[K + 2] = d_delta
+
+    # delta prior always present
+    grad[K + 2] += -(delta_val - 3.7) / 0.1**2
+
+    if prior_type == "flat":
+        pass
+
+    elif prior_type == "weakly":
+        # gamma ~ N(2.5, 0.5^2)
+        grad[K] += -(gamma_val - 2.5) / 0.5**2
+
+        # eta ~ LogNormal(log(500), 1)
+        # prior derivative wrt log_eta: -(log_eta - log(500)) - 1
+        # Jacobian wrt log_eta: +1
+        # net effect: -(log_eta - log(500))
+        grad[K + 1] += -(log_eta - np.log(500.0))
+
+    elif prior_type == "lognormal_gamma":
+        if gamma_val <= 0:
+            return np.zeros(K + 5)
+        grad[K] += -((np.log(gamma_val) - np.log(2.5)) / 0.2**2) * (1.0 / gamma_val) - 1.0 / gamma_val
+
+        # eta is flat in this case, so only Jacobian remains
+        grad[K + 1] += 1.0
+
+    else:
+        raise ValueError(f"Unknown prior type: {prior_type}")
+
+    if prior_type == "flat":
+        # eta flat in natural space, so transformed-space Jacobian contributes +1
+        grad[K + 1] += 1.0
+
+    # Hyperparameter gradients
+    if parameterization == "centered":
+        grad[K + 3] = np.sum((log_phi_k - mu_phi) / sigma_phi**2) - mu_phi / 10.0
+        grad[K + 4] = (
+            -K
+            + np.sum((log_phi_k - mu_phi)**2 / sigma_phi**2)
+            - 2.0 * sigma_phi**2 / (1.0 + sigma_phi**2)
+            + 1.0  # Jacobian for sigma_phi = exp(log_sigma_phi)
+        )
+    else:
+        grad[K + 3] = d_mu_phi_like - mu_phi / 10.0
+        grad[K + 4] = (
+            d_log_sigma_like
+            - K
+            - 2.0 * sigma_phi**2 / (1.0 + sigma_phi**2)
+            + 1.0  # Jacobian for sigma_phi = exp(log_sigma_phi)
+        )
+
+    return grad
+
+# sanity check for gradient of hierarchical model
+def verify_gradient_hierarchical(theta, seasons, parameterization = "centered", prior_type = "weakly", eps = 1e-5) -> dict:
+    analytic = grad_log_posterior_hierarchical(theta, seasons, parameterization, prior_type)
+    numerical = np.zeros_like(theta)
+    for j in range(len(theta)):
+        e_j = np.zeros_like(theta)
+        e_j[j] = eps
+        f_plus = log_posterior_hierarchical(theta + e_j, seasons, parameterization, prior_type)
+        f_minus = log_posterior_hierarchical(theta - e_j, seasons, parameterization, prior_type)
+
+        if np.isfinite(f_plus) and np.isfinite(f_minus):
+            numerical[j] = (f_plus - f_minus) / (2 * eps)
+
+    return {
+        "analytic": analytic,
+        "numerical": numerical,
+        "abs_diff": np.abs(analytic - numerical),
+        "max_abs_diff": np.max(np.abs(analytic - numerical)),
+        "rel_diff": np.abs(analytic - numerical) / (np.abs(numerical) + 1e-30),
+    }
 
 # test
 if __name__ == "__main__":
@@ -438,11 +596,12 @@ if __name__ == "__main__":
     print(f"Max abs diff: {result2['max_abs_diff']:.2e}\n\n")
 
     # test hierarchical model
-    print("HIERARCHICAL MODEL, log posterior eval")
+    print("HIERARCHICAL MODEL")
 
     hds = generate_hierarchical(K=10, rng=rng)
     K = len(hds.seasons)
-
+   
+    print("WEAK PRIOR CASE")
     # centered parameterization theta = [log_phi_1,...,log_phi_K, gamma, log_eta, delta, mu_phi, log_sigma_phi]
     theta_hier = np.concatenate([
         np.log(hds.phi_k),
@@ -452,9 +611,14 @@ if __name__ == "__main__":
          hds.true_params["mu_phi"],
          np.log(hds.true_params["sigma_phi"])],
     ])
-
+    
+    
     lp_c = log_posterior_hierarchical(theta_hier, hds.seasons, "centered", "weakly")
-    print(f"\nLog posterior (centered) at true params: {lp_c:.2f}")
+    print(f"Log posterior (centered) at true params: {lp_c:.2f}")
+
+    result_c = verify_gradient_hierarchical(theta_hier, hds.seasons, "centered", "weakly")
+    print(f"Gradient check at true params.")
+    print(f"Max abs diff: {result_c['max_abs_diff']:.2e}\n\n")
 
     # non centered, we convert to z_k
     sigma_phi = hds.true_params["sigma_phi"]
@@ -472,4 +636,40 @@ if __name__ == "__main__":
 
     lp_nc = log_posterior_hierarchical(theta_nc, hds.seasons, "noncentered", "weakly")
     print(f"Log posterior (non centered) at true params: {lp_nc:.2f}")
-    print(f"\nBoth finite? {np.isfinite(lp_c) and np.isfinite(lp_nc)}")
+    #print(f"\nBoth finite? {np.isfinite(lp_c) and np.isfinite(lp_nc)}")
+
+    result_nc = verify_gradient_hierarchical(theta_hier, hds.seasons, "noncentered", "weakly")
+    print(f"Gradient check at true params.")
+    print(f"Max abs diff: {result_nc['max_abs_diff']:.2e}\n")
+
+    print("FLAT PRIOR CASE")
+    lp_c = log_posterior_hierarchical(theta_hier, hds.seasons, "centered", "flat")
+    print(f"Log posterior (centered) at true params: {lp_c:.2f}")
+
+    result_c = verify_gradient_hierarchical(theta_hier, hds.seasons, "centered", "flat")
+    print(f"Gradient check at true params.")
+    print(f"Max abs diff: {result_c['max_abs_diff']:.2e}\n")
+
+    lp_nc = log_posterior_hierarchical(theta_nc, hds.seasons, "noncentered", "flat")
+    print(f"Log posterior (non centered) at true params: {lp_nc:.2f}")
+    #print(f"\nBoth finite? {np.isfinite(lp_c) and np.isfinite(lp_nc)}")
+
+    result_nc = verify_gradient_hierarchical(theta_hier, hds.seasons, "noncentered", "flat")
+    print(f"Gradient check at true params.")
+    print(f"Max abs diff: {result_nc['max_abs_diff']:.2e}\n\n")
+
+    print("LOG NORMAL CASE")
+    lp_c = log_posterior_hierarchical(theta_hier, hds.seasons, "centered", "lognormal_gamma")
+    print(f"Log posterior (centered) at true params: {lp_c:.2f}")
+
+    result_c = verify_gradient_hierarchical(theta_hier, hds.seasons, "centered", "lognormal_gamma")
+    print(f"Gradient check at true params.")
+    print(f"Max abs diff: {result_c['max_abs_diff']:.2e}\n")
+
+    lp_nc = log_posterior_hierarchical(theta_nc, hds.seasons, "noncentered", "lognormal_gamma")
+    print(f"Log posterior (non centered) at true params: {lp_nc:.2f}")
+    #print(f"\nBoth finite? {np.isfinite(lp_c) and np.isfinite(lp_nc)}")
+
+    result_nc = verify_gradient_hierarchical(theta_hier, hds.seasons, "noncentered", "lognormal_gamma")
+    print(f"Gradient check at true params.")
+    print(f"Max abs diff: {result_nc['max_abs_diff']:.2e}\n\n")
