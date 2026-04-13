@@ -678,11 +678,14 @@ if __name__ == "__main__":
         }
     print(f"True params, (transformed) are {theta_true}")
 
+
+    prior_type = "lognormal_gamma"
+    
     def log_post(theta):
-        return log_posterior_base(theta, ds.counts, ds.E_centers, ds.E_widths, "weakly")
+        return log_posterior_base(theta, ds.counts, ds.E_centers, ds.E_widths, prior_type)
 
     def grad_log_post(theta):
-        return grad_log_posterior_base(theta, ds.counts, ds.E_centers, ds.E_widths, "weakly")
+        return grad_log_posterior_base(theta, ds.counts, ds.E_centers, ds.E_widths, prior_type)
 
     # start near true values
     theta_init = theta_true + rng.normal(0, 0.1, size=4)
