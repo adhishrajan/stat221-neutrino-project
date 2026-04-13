@@ -371,9 +371,8 @@ def run_mala(
         sampler_name="MALA",
     )
 
-
-# wrapper function for running multiple chains
-def run_multiple_chains(sampler_fn, theta_init, n_chains=4, init_strategy="jitter", init_scale=0.5,rng=None, **sampler_kwargs):
+# wrapper for running multiple parallel chains from dispersed starting conditions
+def run_multiple_chains(sampler_fn, theta_init: np.ndarray, n_chains: int = 4, init_strategy: str = "jitter", init_scale: float = 0.5, rng: Optional[np.random.Generator] = None, **sampler_kwargs) -> list[MCMCResult]:
     if rng is None:
         rng = np.random.default_rng()
 
@@ -387,7 +386,7 @@ def run_multiple_chains(sampler_fn, theta_init, n_chains=4, init_strategy="jitte
         else:
             raise ValueError(f"Unknown init_strategy: {init_strategy}")
 
-        # Give each chain its own RNG stream
+        # independent RNG per chain
         chain_rng = np.random.default_rng(rng.integers(0, 2**32 - 1))
 
         result = sampler_fn(
@@ -396,90 +395,67 @@ def run_multiple_chains(sampler_fn, theta_init, n_chains=4, init_strategy="jitte
             verbose=True,
             **sampler_kwargs,
         )
-
         results.append(result)
 
     return results
 
+# NEW MULTI-CHAIN DIAGNOSTICS
 
-# NEW DIAGNOSTICS
+def _stack_chains(results: list[MCMCResult]) -> np.ndarray:
+    """
+    Stack samples from multiple chains into shape (n_chains, n_samples, d)
+    """
+    if len(results) == 0:
+        raise ValueError("results must be non-empty")
 
+    lengths = [r.samples.shape[0] for r in results]
+    m = min(lengths)
+    d = results[0].samples.shape[1]
 
-# OLD DIAGNOSTICS
+    stacked = np.zeros((len(results), m, d))
+    for c, r in enumerate(results):
+        if r.samples.shape[1] != d:
+            raise ValueError("All chains must have the same number of parameters")
+        stacked[c] = r.samples[:m]
 
-def effective_sample_size(chain) -> float:
-    n = len(chain)
-    if n < 10:
-        return float(n)
-
-    # center chain
-    x = chain - np.mean(chain)
-    var = np.var(chain)
-    if var < 1e-30:
-        return 1.0
-
-    # autocorrelation
-    fft_x = np.fft.fft(x, n=2*n)
-    acf_full = np.fft.ifft(fft_x * np.conj(fft_x)).real[:n] / (var * n)
-
-    T = 1
-    for k in range(1, n):
-        if acf_full[k] < 0:
-            break
-        T += 1
-
-    tau_int = 1.0 + 2.0 * np.sum(acf_full[1:T])
-    tau_int = max(tau_int, 1.0)
-
-    return n / tau_int
+    return stacked
 
 
-def compute_ess_per_second(result) -> dict:
-    _, d = result.samples.shape
-    ess_dict = {}
-    for j in range(d):
-        name = result.param_names[j]
-        ess = effective_sample_size(result.samples[:, j])
-        ess_dict[name] = {
-            "ESS": ess,
-            "ESS_per_sec": ess / result.wall_time,
-        }
-    return ess_dict
+def _combined_samples(results: list[MCMCResult]) -> np.ndarray:
+    """
+    Combine multiple chains into one array of shape (n_chains * n_samples, d).
+    """
+    stacked = _stack_chains(results)
+    n_chains, n_samples, d = stacked.shape
+    return stacked.reshape(n_chains * n_samples, d)
 
+# computes R-hat across several parallel chains
+def split_rhat(chains: np.ndarray) -> float:
+    n_chains, n_samples = chains.shape
+    if n_chains < 2 or n_samples < 4:
+        return float("nan")
 
-def split_rhat(chains) -> float:
+    half = n_samples // 2
+    if half < 2:
+        return float("nan")
+
     # split each chain in half
-    split_chains = []
-    for chain in chains:
-        mid = len(chain) // 2
-        split_chains.append(chain[:mid])
-        split_chains.append(chain[mid:])
+    split = np.concatenate([chains[:, :half], chains[:, half:2*half]], axis=0)
+    C, m = split.shape
 
-    C = len(split_chains)
-    m = min(len(c) for c in split_chains)
+    chain_means = np.mean(split, axis=1)
+    chain_vars = np.var(split, axis=1, ddof=1)
 
-    # trim all to same length
-    split_chains = [c[:m] for c in split_chains]
-
-    # within chain var
-    chain_means = np.array([np.mean(c) for c in split_chains])
-    chain_vars = np.array([np.var(c, ddof=1) for c in split_chains])
     W = np.mean(chain_vars)
-
-    # between chain var
-    grand_mean = np.mean(chain_means)
-    B = m * np.var(chain_means, ddof=1)
-
-    # pooled var estimate
-    V_hat = (m - 1) / m * W + B / m
-
     if W < 1e-30:
-        return float('nan')
+        return float("nan")
 
-    return np.sqrt(V_hat / W)
+    B = m * np.var(chain_means, ddof=1)
+    var_hat = (m - 1) / m * W + B / m
 
+    return float(np.sqrt(var_hat / W))
 
-def autocorrelation(chain, max_lag = 100) -> np.ndarray:
+def autocorrelation(chain: np.ndarray, max_lag: int = 1000) -> np.ndarray:
     n = len(chain)
     x = chain - np.mean(chain)
     var = np.var(chain)
@@ -493,79 +469,179 @@ def autocorrelation(chain, max_lag = 100) -> np.ndarray:
     return acf
 
 
-def print_diagnostics(results):
-    # we print a comp table across the sampler results
-    print(f"\n{'Sampler':<12} {'Accept%':>8} {'Time(s)':>8}", end="")
-    d = results[0].samples.shape[1]
-    for j in range(d):
-        name = results[0].param_names[j]
+def effective_sample_size_multi(chains: np.ndarray, max_lag: Optional[int] = None) -> float:
+    n_chains, n_samples = chains.shape
+    if n_samples < 10:
+        return float(n_chains * n_samples)
+
+    if max_lag is None:
+        max_lag = min(1000, n_samples - 1)
+
+    # average autocorrelation across chains
+    acfs = np.array([autocorrelation(chains[c], max_lag=max_lag) for c in range(n_chains)])
+    mean_acf = np.mean(acfs, axis=0)
+
+    # initial positive sequence
+    tau = 1.0
+    for k in range(1, len(mean_acf)):
+        if mean_acf[k] < 0:
+            break
+        tau += 2.0 * mean_acf[k]
+
+    tau = max(tau, 1.0)
+    return float(n_chains * n_samples / tau)
+
+def compute_ess_per_second_multi(results: list[MCMCResult]) -> dict[str, dict[str, float]]:
+    stacked = _stack_chains(results)
+    total_time = sum(r.wall_time for r in results)
+    param_names = results[0].param_names
+
+    ess_dict = {}
+    for j, name in enumerate(param_names):
+        ess = effective_sample_size_multi(stacked[:, :, j])
+        ess_dict[name] = {
+            "ESS": ess,
+            "ESS_per_sec": ess / total_time,
+        }
+    return ess_dict
+
+# Outputs summary statistics for posterior estimates
+def posterior_summary_multi(results: list[MCMCResult], ci: float = 0.90, true_values: Optional[dict[str, float]] = None) -> dict[str, dict[str, float]]:
+    combined = _combined_samples(results)
+    param_names = results[0].param_names
+
+    alpha = 1.0 - ci
+    lo = 100.0 * (alpha / 2.0)
+    hi = 100.0 * (1.0 - alpha / 2.0)
+
+    out = {}
+    for j, name in enumerate(param_names):
+        x = combined[:, j]
+    
+        # transform to natural scale
+        if name == "log_phi":
+            x = np.exp(x)
+            display_name = "phi"
+        elif name == "log_eta":
+            x = np.exp(x)
+            display_name = "eta"
+        else:
+            display_name = name
+    
+        out[name] = {
+            "display_name": display_name,
+            "mean": float(np.mean(x)),
+            "sd": float(np.std(x, ddof=1)),
+            "median": float(np.median(x)),
+            "ci_lower": float(np.percentile(x, lo)),
+            "ci_upper": float(np.percentile(x, hi)),
+            "true": None if true_values is None else true_values.get(display_name, None),
+        }
+    return out
+
+def print_diagnostics_multi(results_by_sampler: dict[str, list[MCMCResult]], ci: float = 0.90, true_values: Optional[dict[str, float]] = None) -> None:
+    first_key = next(iter(results_by_sampler))
+    first_results = results_by_sampler[first_key]
+    d = first_results[0].samples.shape[1]
+    param_names = first_results[0].param_names
+
+    # ESS table
+    print(f"\n{'Sampler':<12} {'Chains':>6} {'Accept%':>8} {'Time(s)':>8}", end="")
+    for name in param_names:
         print(f"ESS({name})", end="")
     print()
-    print("-" * (30 + 12 * d))
+    print("-" * (36 + 12 * d))
 
-    for result in results:
-        print(f"{result.sampler_name:<12} {result.acceptance_rate:>7.3f} "
-              f"{result.wall_time:>8.1f}", end="")
+    for sampler_name, results in results_by_sampler.items():
+        stacked = _stack_chains(results)
+        mean_accept = np.mean([r.acceptance_rate for r in results])
+        total_time = np.sum([r.wall_time for r in results])
+
+        print(f"{sampler_name:<12} {len(results):>6} {mean_accept:>8.3f} {total_time:>8.1f}", end="")
         for j in range(d):
-            ess = effective_sample_size(result.samples[:, j])
+            ess = effective_sample_size_multi(stacked[:, :, j])
             print(f"  {ess:>9.0f}", end="")
         print()
 
-
-    print(f"\n{'Sampler':<12} {'Accept%':>8} {'Time(s)':>8}", end="")
-    for j in range(d):
-        name = results[0].param_names[j]
+    # ESS/sec table
+    print(f"\n{'Sampler':<12} {'Chains':>6} {'Accept%':>8} {'Time(s)':>8}", end="")
+    for name in param_names:
         print(f"ESS/s({name})", end="")
     print()
-    print("-" * (30 + 14 * d))
+    print("-" * (36 + 14 * d))
 
-    for result in results:
-        print(f"{result.sampler_name:<12} {result.acceptance_rate:>7.3f}"
-              f"{result.wall_time:>8.1f}", end="")
+    for sampler_name, results in results_by_sampler.items():
+        stacked = _stack_chains(results)
+        mean_accept = np.mean([r.acceptance_rate for r in results])
+        total_time = np.sum([r.wall_time for r in results])
+
+        print(f"{sampler_name:<12} {len(results):>6} {mean_accept:>8.3f} {total_time:>8.1f}", end="")
         for j in range(d):
-            ess = effective_sample_size(result.samples[:, j])
-            ess_per_s = ess / result.wall_time
-            print(f"{ess_per_s:>11.1f}", end="")
+            ess = effective_sample_size_multi(stacked[:, :, j])
+            print(f"{ess / total_time:>11.1f}", end="")
         print()
 
-    print(f"\n{'Sampler':<12} {'Accept%':>8} {'Time(s)':>8}", end="")
-    for j in range(d):
-        name = results[0].param_names[j]
+    # Rhat table
+    print(f"\n{'Sampler':<12} {'Chains':>6} {'Accept%':>8} {'Time(s)':>8}", end="")
+    for name in param_names:
         print(f"Rhat({name})", end="")
     print()
-    print("-" * (30 + 12 * d))
+    print("-" * (36 + 12 * d))
 
-    for result in results:
-        print(f"{result.sampler_name:<12} {result.acceptance_rate:>7.3f} "
-              f"{result.wall_time:>8.1f}", end="")
+    for sampler_name, results in results_by_sampler.items():
+        stacked = _stack_chains(results)
+        mean_accept = np.mean([r.acceptance_rate for r in results])
+        total_time = np.sum([r.wall_time for r in results])
+
+        print(f"{sampler_name:<12} {len(results):>6} {mean_accept:>8.3f} {total_time:>8.1f}", end="")
         for j in range(d):
-            chain = result.samples[:, j]
-            mid = len(chain) // 2
-
-            if mid < 2:
-                rhat = float("nan")
-            else:
-                # split a single chain into two halves and treat them as two chains
-                rhat = split_rhat([chain[:mid], chain[mid:]])
-
+            rhat = split_rhat(stacked[:, :, j])
             print(f"  {rhat:>9.3f}", end="")
         print()
 
+    # posterior summaries
+    alpha = 1.0 - ci
+    lo = 100.0 * (alpha / 2.0)
+    hi = 100.0 * (1.0 - alpha / 2.0)
+
+    for sampler_name, results in results_by_sampler.items():
+        summary = posterior_summary_multi(results, ci=ci, true_values = true_values)
+        print(f"\nPosterior summary for {sampler_name} ({int(ci*100)}% CI)")
+        print(f"{'Param':<12} {'True':>12} {'Mean':>12} {'SD':>12} {'Median':>12} {'CI low':>12} {'CI high':>12}")
+        print("-" * 86)
+        for name in param_names:
+            s = summary[name]
+        
+            true_val = s["true"]
+            true_str = "NA" if true_val is None else f"{true_val:.4f}"
+        
+            print(
+                f"{s['display_name']:<12} "
+                f"{true_str:>12} "
+                f"{s['mean']:>12.4f} "
+                f"{s['sd']:>12.4f} "
+                f"{s['median']:>12.4f} "
+                f"{s['ci_lower']:>12.4f} "
+                f"{s['ci_upper']:>12.4f}"
+            )
+
 # saves traceplots for each sampler, showing traces for each chain for each parameter
-def save_traceplots(result: MCMCResult, filename: str) -> None:
-    n_samples, d = result.samples.shape
+def save_traceplots_multi(results: list[MCMCResult], filename: str) -> None:
+    stacked = _stack_chains(results)
+    n_chains, n_samples, d = stacked.shape
+    param_names = results[0].param_names
+    sampler_name = results[0].sampler_name
 
     fig, axes = plt.subplots(d, 1, figsize=(10, 2.5 * d), sharex=True)
-
     if d == 1:
         axes = [axes]
 
     x = np.arange(n_samples)
-
     for j, ax in enumerate(axes):
-        ax.plot(x, result.samples[:, j], linewidth=0.7, alpha = 0.8)
-        ax.set_ylabel(result.param_names[j])
-        ax.set_title(f"{result.sampler_name} trace: {result.param_names[j]}")
+        for c in range(n_chains):
+            ax.plot(x, stacked[c, :, j], linewidth=0.7, alpha=0.7)
+        ax.set_ylabel(param_names[j])
+        ax.set_title(f"{sampler_name} trace: {param_names[j]}")
 
     axes[-1].set_xlabel("Iteration")
     fig.tight_layout()
@@ -577,7 +653,7 @@ if __name__ == "__main__":
     from simulator import generate_single_season
     from posteriors import log_posterior_base, grad_log_posterior_base
 
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(221)
 
     print("Generating data")
     ds = generate_single_season(rng=rng)
@@ -593,6 +669,13 @@ if __name__ == "__main__":
         np.log(ds.true_params["eta"]),
         ds.true_params["delta"],      
     ])
+
+    true_values = {
+        "phi": ds.true_params["phi"],
+        "gamma": ds.true_params["gamma"],
+        "eta": ds.true_params["eta"],
+        "delta": ds.true_params["delta"],
+        }
     print(f"True params, (transformed) are {theta_true}")
 
     def log_post(theta):
@@ -604,31 +687,34 @@ if __name__ == "__main__":
     # start near true values
     theta_init = theta_true + rng.normal(0, 0.1, size=4)
 
-
-    print("Running RWMH!")
-
-    result_rwmh = run_rwmh(
-        log_posterior_fn=log_post,
-        theta_init=theta_init,
-        n_iterations=20000,
-        n_burnin=5000,
-        adapt_proposal=True,
-        param_names=param_names,
-        rng=rng,
-    )
-
-
-    print("Running MALA using preconditioning with proposal covariance from RWMH!")
-
     rwmh_cov = np.array([[ 6.03197198e-01,  8.96567747e-02, -2.91649216e-02,  9.60971215e-03],
                          [ 8.96567747e-02,  1.42153684e-01, -7.10077053e-03,  1.23259937e-03],
                          [-2.91649216e-02, -7.10077053e-03,  2.42239884e-03, -8.50658921e-04],
                          [ 9.60971215e-03,  1.23259937e-03, -8.50658921e-04,  3.38134000e-04]])
+
+    rwmh_results = run_multiple_chains(
+        run_rwmh,
+        theta_init=theta_init,
+        n_chains=4,
+        init_strategy="jitter",
+        init_scale=0.1,
+        rng=rng,
+        log_posterior_fn=log_post,
+        n_iterations=20000,
+        n_burnin=5000,
+        adapt_proposal=True,
+        param_names=param_names,
+    )
     
-    result_mala = run_mala(
+    mala_results = run_multiple_chains(
+        run_mala,
+        theta_init=theta_init,
+        n_chains=4,
+        init_strategy="jitter",
+        init_scale=0.1,
+        rng=rng,
         log_posterior_fn=log_post,
         grad_log_posterior_fn=grad_log_post,
-        theta_init=theta_init,
         n_iterations=30000,
         n_burnin=10000,
         step_size=1e-4,
@@ -636,50 +722,22 @@ if __name__ == "__main__":
         adapt_until=10000,
         target_accept=0.57,
         param_names=param_names,
-        rng=rng,
         precond=rwmh_cov + 1e-6 * np.eye(4),
         adapt_precond=False,
         precond_type="dense",
         normalize_precond=True,
     )
 
-    print("SAMPLER COMPARISON")
-    print_diagnostics([result_rwmh, result_mala])
+    print_diagnostics_multi({"RWMH": rwmh_results,"MALA": mala_results}, true_values = true_values)
+    
+
+    # print("SAMPLER COMPARISON")
+    # print_diagnostics([result_rwmh, result_mala])
 
     # saving traces
-    save_traceplots(result_rwmh, "traceplots_rwmh.png")
-    save_traceplots(result_mala, "traceplots_mala.png")
+    save_traceplots_multi(rwmh_results, "traceplots_rwmh.png")
+    save_traceplots_multi(mala_results, "traceplots_mala.png")
     print("\nSaved traceplots to:")
     print("  traceplots_rwmh.png")
     print("  traceplots_mala.png")
     
-    print("POSTERIOR SUMMARY vs true values")
-
-    for j, name in enumerate(param_names):
-        chain_rwmh = result_rwmh.samples[:, j]
-        chain_mala = result_mala.samples[:, j]
-
-        if name == "log_phi":
-            display_name = "phi"
-            true_val = ds.true_params["phi"]
-            chain_rwmh_display = np.exp(chain_rwmh)
-            chain_mala_display = np.exp(chain_mala)
-        elif name == "log_eta":
-            display_name = "eta"
-            true_val = ds.true_params["eta"]
-            chain_rwmh_display = np.exp(chain_rwmh)
-            chain_mala_display = np.exp(chain_mala)
-        else:
-            display_name = name
-            true_val = ds.true_params[name]
-            chain_rwmh_display = chain_rwmh
-            chain_mala_display = chain_mala
-
-        print(f"\n{display_name}:")
-        print(f"True: {true_val:.4f}")
-        print(f"RWMH: {np.mean(chain_rwmh_display):.4f} "
-              f"[{np.percentile(chain_rwmh_display, 5):.4f}, "
-              f"{np.percentile(chain_rwmh_display, 95):.4f}]")
-        print(f"MALA: {np.mean(chain_mala_display):.4f} "
-              f"[{np.percentile(chain_mala_display, 5):.4f}, "
-              f"{np.percentile(chain_mala_display, 95):.4f}]")
