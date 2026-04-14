@@ -522,7 +522,7 @@ if __name__ == "__main__":
 
     print("BASE MODEL Log posterior and gradient check")
 
-    ds = generate_single_season(rng=rng)
+    ds = generate_single_season(rng=rng, truth_model = "power_law")
 
     # true params in the transformed space
     theta_true = np.array([
