@@ -118,8 +118,6 @@ def run_rwmh(
                   f"accept rate = {current_rate:.3f}, "
                   f"scale = {scale_factor:.3f}, "
                   f"elapsed = {elapsed:.1f}s")
-
-    print(f"RWMN Proposal Covariance = {proposal_cov}")
     wall_time = time.time() - start_time
 
     post_burnin = samples[n_burnin:]
@@ -370,6 +368,28 @@ def run_mala(
         param_names=param_names,
         sampler_name="MALA",
     )
+
+# estimates preconditioning matrix for MALA from RWMH pilot run
+def estimate_dense_precond_from_rwmh(results: list[MCMCResult],ridge: float = 1e-6,use_combined: bool = True) -> np.ndarray:
+    """
+    use_combined: if True, computes covariance from all chains; else, computes mean covaraiance across chains
+    """
+    if len(results) == 0:
+        raise ValueError("results must be non-empty")
+
+    d = results[0].samples.shape[1]
+
+    if use_combined:
+        combined = np.concatenate([r.samples for r in results], axis=0)
+        cov = np.cov(combined.T, ddof=1)
+    else:
+        covs = [np.cov(r.samples.T, ddof=1) for r in results]
+        cov = np.mean(covs, axis=0)
+
+    cov = 0.5 * (cov + cov.T)  # force symmetry
+    cov = cov + ridge * np.eye(d)
+
+    return cov
 
 # wrapper for running multiple parallel chains from dispersed starting conditions
 def run_multiple_chains(sampler_fn, theta_init: np.ndarray, n_chains: int = 4, init_strategy: str = "jitter", init_scale: float = 0.5, rng: Optional[np.random.Generator] = None, **sampler_kwargs) -> list[MCMCResult]:
@@ -690,17 +710,13 @@ if __name__ == "__main__":
     # start near true values
     theta_init = theta_true + rng.normal(0, 0.1, size=4)
 
-    rwmh_cov = np.array([[ 6.03197198e-01,  8.96567747e-02, -2.91649216e-02,  9.60971215e-03],
-                         [ 8.96567747e-02,  1.42153684e-01, -7.10077053e-03,  1.23259937e-03],
-                         [-2.91649216e-02, -7.10077053e-03,  2.42239884e-03, -8.50658921e-04],
-                         [ 9.60971215e-03,  1.23259937e-03, -8.50658921e-04,  3.38134000e-04]])
 
     rwmh_results = run_multiple_chains(
         run_rwmh,
         theta_init=theta_init,
         n_chains=4,
         init_strategy="jitter",
-        init_scale=0.1,
+        init_scale=0.05,
         rng=rng,
         log_posterior_fn=log_post,
         n_iterations=20000,
@@ -708,24 +724,30 @@ if __name__ == "__main__":
         adapt_proposal=True,
         param_names=param_names,
     )
+
+    rwmh_cov = estimate_dense_precond_from_rwmh(rwmh_results, ridge=1e-6)
+
+    print("\nEstimated dense preconditioner from RWMH:")
+    print(rwmh_cov)
+
     
     mala_results = run_multiple_chains(
         run_mala,
         theta_init=theta_init,
         n_chains=4,
         init_strategy="jitter",
-        init_scale=0.1,
+        init_scale=0.05,
         rng=rng,
         log_posterior_fn=log_post,
         grad_log_posterior_fn=grad_log_post,
-        n_iterations=30000,
-        n_burnin=10000,
+        n_iterations=20000,
+        n_burnin=5000,
         step_size=1e-4,
         adapt_step=True,
-        adapt_until=10000,
+        adapt_until=5000,
         target_accept=0.57,
         param_names=param_names,
-        precond=rwmh_cov + 1e-6 * np.eye(4),
+        precond=rwmh_cov,
         adapt_precond=False,
         precond_type="dense",
         normalize_precond=True,
