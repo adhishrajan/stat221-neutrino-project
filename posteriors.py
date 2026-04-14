@@ -317,10 +317,17 @@ def log_posterior_hierarchical(theta, seasons, parameterization = "centered", pr
             return -np.inf
         lp += poisson_log_likelihood(ds.counts, mu)
 
-    # population prior on log_phi_k is N(mu_phi, sigma_phi^2)
-    log_phi_k = np.log(phi_k)
-    lp += -0.5 * K * np.log(2 * np.pi) - K * np.log(sigma_phi)
-    lp += -0.5 * np.sum(((log_phi_k - mu_phi) / sigma_phi)**2)
+    if parameterization == "centered":
+        # log_phi_k | mu_phi, sigma_phi ~ N(mu_phi, sigma_phi^2)
+        log_phi_k = p["log_phi_k"]
+        lp += -0.5 * K * np.log(2 * np.pi) - K * np.log(sigma_phi)
+        lp += -0.5 * np.sum(((log_phi_k - mu_phi) / sigma_phi)**2)
+    
+    elif parameterization == "noncentered":
+        # z_k ~ N(0, 1)
+        z_k = p["z_k"]
+        lp += -0.5 * K * np.log(2 * np.pi)
+        lp += -0.5 * np.sum(z_k**2)
 
     # hyperpriors
     # mu_phi = N(0, 10)
@@ -486,9 +493,8 @@ def grad_log_posterior_hierarchical(theta, seasons, parameterization="centered",
         grad[K + 3] = d_mu_phi_like - mu_phi / 10.0
         grad[K + 4] = (
             d_log_sigma_like
-            - K
             - 2.0 * sigma_phi**2 / (1.0 + sigma_phi**2)
-            + 1.0  # Jacobian for sigma_phi = exp(log_sigma_phi)
+            + 1.0
         )
 
     return grad
