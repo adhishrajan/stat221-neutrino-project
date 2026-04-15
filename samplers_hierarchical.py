@@ -118,6 +118,7 @@ def run_rwmh(
                   f"accept rate = {current_rate:.3f}, "
                   f"scale = {scale_factor:.3f}, "
                   f"elapsed = {elapsed:.1f}s")
+
     wall_time = time.time() - start_time
 
     post_burnin = samples[n_burnin:]
@@ -369,14 +370,13 @@ def run_mala(
         sampler_name="MALA",
     )
 
-# estimates preconditioning matrix for MALA from RWMH pilot run
-def estimate_dense_precond_from_rwmh(results: list[MCMCResult],ridge: float = 1e-6,use_combined: bool = True) -> np.ndarray:
-    """
-    use_combined: if True, computes covariance from all chains; else, computes mean covaraiance across chains
-    """
-    if len(results) == 0:
-        raise ValueError("results must be non-empty")
 
+# estimates preconditioning matrix for MALA from RWMH empirical covariance
+def estimate_dense_precond_from_rwmh(results: list[MCMCResult], ridge: float = 1e-6,use_combined: bool = True,) -> np.ndarray:
+    """
+    fidge: small diagonal ridge for numerical stability
+    use_combined: if true, pools all draws across chains; else, averages covariances across chains
+    """
     d = results[0].samples.shape[1]
 
     if use_combined:
@@ -390,7 +390,7 @@ def estimate_dense_precond_from_rwmh(results: list[MCMCResult],ridge: float = 1e
     cov = cov + ridge * np.eye(d)
 
     return cov
-
+    
 # wrapper for running multiple parallel chains from dispersed starting conditions
 def run_multiple_chains(sampler_fn, theta_init: np.ndarray, n_chains: int = 4, init_strategy: str = "jitter", init_scale: float = 0.5, rng: Optional[np.random.Generator] = None, **sampler_kwargs) -> list[MCMCResult]:
     if rng is None:
@@ -525,6 +525,64 @@ def compute_ess_per_second_multi(results: list[MCMCResult]) -> dict[str, dict[st
         }
     return ess_dict
 
+# function to transform MCMC parameters into interpretable scales (for diagnostics + plotting)
+def transform_hierarchical_samples(stacked: np.ndarray, parameterization: str, K: int, latent_display: str = "log_phi") -> tuple[np.ndarray, list[str]]:
+    """
+    parameterization: "centered" or "noncentered"
+    K: number of seasons
+    latent_display: how to display phi parameters
+        - "raw": show raw sampled coords
+            centered -> log_phi_k
+            noncentered -> z_k
+        - "log_phi": always show log_phi_k
+        - "phi": always show phi_k
+    """
+    n_chains, n_samples, d = stacked.shape
+    out = stacked.copy()
+
+    if parameterization == "centered":
+        # theta = [log_phi_1,...,log_phi_K,gamma,log_eta,delta,mu_phi,log_sigma_phi]
+        log_phi = stacked[:, :, :K]
+
+        if latent_display == "raw" or latent_display == "log_phi":
+            out[:, :, :K] = log_phi
+            latent_names = [f"log_phi_{k+1}" for k in range(K)]
+        elif latent_display == "phi":
+            out[:, :, :K] = np.exp(log_phi)
+            latent_names = [f"phi_{k+1}" for k in range(K)]
+        else:
+            raise ValueError(f"Unknown latent_display: {latent_display}")
+
+    elif parameterization == "noncentered":
+        # theta = [z_1,...,z_K,gamma,log_eta,delta,mu_phi,log_sigma_phi]
+        z = stacked[:, :, :K]
+        mu_phi = stacked[:, :, K + 3]
+        log_sigma_phi = stacked[:, :, K + 4]
+        sigma_phi = np.exp(log_sigma_phi)
+
+        if latent_display == "raw":
+            out[:, :, :K] = z
+            latent_names = [f"z_{k+1}" for k in range(K)]
+        elif latent_display == "log_phi":
+            log_phi = mu_phi[:, :, None] + sigma_phi[:, :, None] * z
+            out[:, :, :K] = log_phi
+            latent_names = [f"log_phi_{k+1}" for k in range(K)]
+        elif latent_display == "phi":
+            log_phi = mu_phi[:, :, None] + sigma_phi[:, :, None] * z
+            out[:, :, :K] = np.exp(log_phi)
+            latent_names = [f"phi_{k+1}" for k in range(K)]
+        else:
+            raise ValueError(f"Unknown latent_display: {latent_display}")
+
+    else:
+        raise ValueError(f"Unknown parameterization: {parameterization}")
+
+    # shared parameters
+    shared_names = ["gamma", "log_eta", "delta", "mu_phi", "log_sigma_phi"]
+    names = latent_names + shared_names
+
+    return out, names
+
 # Outputs summary statistics for posterior estimates
 def posterior_summary_multi(results: list[MCMCResult], ci: float = 0.90, true_values: Optional[dict[str, float]] = None) -> dict[str, dict[str, float]]:
     combined = _combined_samples(results)
@@ -559,11 +617,24 @@ def posterior_summary_multi(results: list[MCMCResult], ci: float = 0.90, true_va
         }
     return out
 
-def print_diagnostics_multi(results_by_sampler: dict[str, list[MCMCResult]], ci: float = 0.90, true_values: Optional[dict[str, float]] = None) -> None:
+# prints output tables
+def print_diagnostics_multi_hierarchical(results_by_sampler: dict[str, list[MCMCResult]], parameterization: str, K: int, latent_display: str = "log_phi", true_values: dict[str, float] | None = None, ci: float = 0.90) -> None:
+    """
+    latent_display: how to display phi parameters
+        - "raw": show raw sampled coords
+            centered -> log_phi_k
+            noncentered -> z_k
+        - "log_phi": always show log_phi_k
+        - "phi": always show phi_k
+    """
     first_key = next(iter(results_by_sampler))
     first_results = results_by_sampler[first_key]
-    d = first_results[0].samples.shape[1]
-    param_names = first_results[0].param_names
+
+    stacked0 = _stack_chains(first_results)
+    transformed0, param_names = transform_hierarchical_samples(
+        stacked0, parameterization=parameterization, K=K, latent_display=latent_display
+    )
+    d = transformed0.shape[2]
 
     # ESS table
     print(f"\n{'Sampler':<12} {'Chains':>6} {'Accept%':>8} {'Time(s)':>8}", end="")
@@ -574,31 +645,17 @@ def print_diagnostics_multi(results_by_sampler: dict[str, list[MCMCResult]], ci:
 
     for sampler_name, results in results_by_sampler.items():
         stacked = _stack_chains(results)
+        transformed, _ = transform_hierarchical_samples(
+            stacked, parameterization=parameterization, K=K, latent_display=latent_display
+        )
+
         mean_accept = np.mean([r.acceptance_rate for r in results])
         total_time = np.sum([r.wall_time for r in results])
 
         print(f"{sampler_name:<12} {len(results):>6} {mean_accept:>8.3f} {total_time:>8.1f}", end="")
         for j in range(d):
-            ess = effective_sample_size_multi(stacked[:, :, j])
+            ess = effective_sample_size_multi(transformed[:, :, j])
             print(f"  {ess:>9.0f}", end="")
-        print()
-
-    # ESS/sec table
-    print(f"\n{'Sampler':<12} {'Chains':>6} {'Accept%':>8} {'Time(s)':>8}", end="")
-    for name in param_names:
-        print(f"ESS/s({name})", end="")
-    print()
-    print("-" * (36 + 14 * d))
-
-    for sampler_name, results in results_by_sampler.items():
-        stacked = _stack_chains(results)
-        mean_accept = np.mean([r.acceptance_rate for r in results])
-        total_time = np.sum([r.wall_time for r in results])
-
-        print(f"{sampler_name:<12} {len(results):>6} {mean_accept:>8.3f} {total_time:>8.1f}", end="")
-        for j in range(d):
-            ess = effective_sample_size_multi(stacked[:, :, j])
-            print(f"{ess / total_time:>11.1f}", end="")
         print()
 
     # Rhat table
@@ -610,12 +667,16 @@ def print_diagnostics_multi(results_by_sampler: dict[str, list[MCMCResult]], ci:
 
     for sampler_name, results in results_by_sampler.items():
         stacked = _stack_chains(results)
+        transformed, _ = transform_hierarchical_samples(
+            stacked, parameterization=parameterization, K=K, latent_display=latent_display
+        )
+
         mean_accept = np.mean([r.acceptance_rate for r in results])
         total_time = np.sum([r.wall_time for r in results])
 
         print(f"{sampler_name:<12} {len(results):>6} {mean_accept:>8.3f} {total_time:>8.1f}", end="")
         for j in range(d):
-            rhat = split_rhat(stacked[:, :, j])
+            rhat = split_rhat(transformed[:, :, j])
             print(f"  {rhat:>9.3f}", end="")
         print()
 
@@ -625,41 +686,59 @@ def print_diagnostics_multi(results_by_sampler: dict[str, list[MCMCResult]], ci:
     hi = 100.0 * (1.0 - alpha / 2.0)
 
     for sampler_name, results in results_by_sampler.items():
-        summary = posterior_summary_multi(results, ci=ci, true_values = true_values)
+        stacked = _stack_chains(results)
+        transformed, names = transform_hierarchical_samples(
+            stacked, parameterization=parameterization, K=K, latent_display=latent_display
+        )
+
+        combined = transformed.reshape(-1, d)
+
         print(f"\nPosterior summary for {sampler_name} ({int(ci*100)}% CI)")
-        print(f"{'Param':<12} {'True':>12} {'Mean':>12} {'SD':>12} {'Median':>12} {'CI low':>12} {'CI high':>12}")
-        print("-" * 86)
-        for name in param_names:
-            s = summary[name]
-        
-            true_val = s["true"]
+        print(f"{'Param':<16} {'True':>12} {'Mean':>12} {'SD':>12} {'Median':>12} {'CI low':>12} {'CI high':>12}")
+        print("-" * 92)
+
+        for j, name in enumerate(names):
+            x = combined[:, j]
+            true_val = None if true_values is None else true_values.get(name, None)
             true_str = "NA" if true_val is None else f"{true_val:.4f}"
-        
+
             print(
-                f"{s['display_name']:<12} "
+                f"{name:<16} "
                 f"{true_str:>12} "
-                f"{s['mean']:>12.4f} "
-                f"{s['sd']:>12.4f} "
-                f"{s['median']:>12.4f} "
-                f"{s['ci_lower']:>12.4f} "
-                f"{s['ci_upper']:>12.4f}"
+                f"{np.mean(x):>12.4f} "
+                f"{np.std(x, ddof=1):>12.4f} "
+                f"{np.median(x):>12.4f} "
+                f"{np.percentile(x, lo):>12.4f} "
+                f"{np.percentile(x, hi):>12.4f}"
             )
 
 # saves traceplots for each sampler, showing traces for each chain for each parameter
-def save_traceplots_multi(results: list[MCMCResult], filename: str) -> None:
+def save_traceplots_multi_hierarchical(results: list[MCMCResult],filename: str,parameterization: str, K: int, latent_display: str = "log_phi") -> None:
+    """
+    latent_display: how to display phi parameters
+        - "raw": show raw sampled coords
+            centered -> log_phi_k
+            noncentered -> z_k
+        - "log_phi": always show log_phi_k
+        - "phi": always show phi_k
+    """
     stacked = _stack_chains(results)
-    n_chains, n_samples, d = stacked.shape
-    param_names = results[0].param_names
+    transformed, param_names = transform_hierarchical_samples(
+        stacked, parameterization=parameterization, K=K, latent_display=latent_display
+    )
+
+    n_chains, n_samples, d = transformed.shape
     sampler_name = results[0].sampler_name
 
-    fig, axes = plt.subplots(d, 1, figsize=(10, 2.5 * d), sharex=True)
+    fig, axes = plt.subplots(d, 1, figsize=(10, 2.4 * d), sharex=True)
     if d == 1:
         axes = [axes]
 
     x = np.arange(n_samples)
+
     for j, ax in enumerate(axes):
         for c in range(n_chains):
-            ax.plot(x, stacked[c, :, j], linewidth=0.7, alpha=0.7)
+            ax.plot(x, transformed[c, :, j], linewidth=0.6, alpha=0.8)
         ax.set_ylabel(param_names[j])
         ax.set_title(f"{sampler_name} trace: {param_names[j]}")
 
@@ -670,73 +749,82 @@ def save_traceplots_multi(results: list[MCMCResult], filename: str) -> None:
 
 # test
 if __name__ == "__main__":
-    from simulator import generate_single_season
-    from posteriors import log_posterior_base, grad_log_posterior_base
+    from simulator import generate_hierarchical
+    from posteriors import log_posterior_hierarchical, grad_log_posterior_hierarchical
     from load_config import load_config
 
     config = load_config()
     test_cfg = config["testing"]
-    signal_cfg = config["signal"]
-    background_cfg = config["background"]
-    bins_cfg = config["energy_bins"]
-    rwmh_cfg = config["samplers"]["RWMH"]
-    mala_cfg = config["samplers"]["MALA"]
+    hier_cfg = config["hierarchical"]
+    rwmh_cfg = config["samplers_hierarchical"]["RWMH"]
+    mala_cfg = config["samplers_hierarchical"]["MALA"]
+    parameterization = test_cfg["hierarchical_parameterization"]
 
-    rng = np.random.default_rng(int(test_cfg["seed_samplers"]))
+    rng = np.random.default_rng(int(test_cfg["seed_hierarchical_samplers"]))
+
     print("Generating data")
-    ds = generate_single_season(
-        phi=float(signal_cfg["phi"]),
-        gamma=float(signal_cfg["gamma"]),
-        eta=float(background_cfg["eta"]),
-        delta=float(background_cfg["delta"]),
-        truth_model=test_cfg["truth_model"],
-        n_bins=int(bins_cfg["n_bins"]),
-        E_min=float(bins_cfg["E_min"]),
-        E_max=float(bins_cfg["E_max"]),
-        gamma2=float(signal_cfg["gamma2"]),
-        E_break=float(signal_cfg["E_break"]),
-        E_cut=float(signal_cfg["E_cut"]),
+    ds = generate_hierarchical(
+        K=int(hier_cfg["K"]),
+        mu_phi=float(hier_cfg["mu_phi"]),
+        sigma_phi=float(hier_cfg["sigma_phi"]),
+        gamma=float(hier_cfg["gamma"]),
+        eta=float(hier_cfg["eta"]),
+        delta=float(hier_cfg["delta"]),
+        truth_model=hier_cfg["truth_model"],
         rng=rng,
     )
-    print(f"Total counts: {ds.counts.sum()}, "
-          f"Signal: {ds.mu_signal.sum():.0f}, "
-          f"Background: {ds.mu_background.sum():.0f}")
+    K = len(ds.seasons)
+    print(f"K = {K}, True means = {ds.phi_k}")
 
-    param_names = ["log_phi", "gamma", "log_eta", "delta"]
+    if parameterization == "centered":
+        print("CENTERED PARAMETERIZATION")
+        param_names = [f"log_phi_{i+1}" for i in range(K)]
+        theta_true = np.log(ds.phi_k).tolist()
+        latent_truth = {f"log_phi_{k+1}": np.log(ds.phi_k[k]) for k in range(K)}
+    elif parameterization == "noncentered":
+        print("NONCENTERED PARAMETERIZATION")
+        param_names = [f"z_{i+1}" for i in range(K)]
+        z_true = (np.log(ds.phi_k) - ds.true_params["mu_phi"]) / ds.true_params["sigma_phi"]
+        theta_true = z_true.tolist()
+        latent_truth = {f"z_{k+1}": z_true[k] for k in range(K)}
+    else:
+        raise ValueError(f"Unknown parameterization: {parameterization}")
 
-    theta_true = np.array([
-        np.log(ds.true_params["phi"]),
-        ds.true_params["gamma"],      
+    param_names.extend(["gamma", "log_eta", "delta", "mu_phi", "log_sigma_phi"])
+    theta_true.extend([
+        ds.true_params["gamma"],
         np.log(ds.true_params["eta"]),
-        ds.true_params["delta"],      
+        ds.true_params["delta"],
+        ds.true_params["mu_phi"],
+        np.log(ds.true_params["sigma_phi"]),
     ])
-
-    true_values = {
-        "phi": ds.true_params["phi"],
-        "gamma": ds.true_params["gamma"],
-        "eta": ds.true_params["eta"],
-        "delta": ds.true_params["delta"],
-        }
+    theta_true = np.array(theta_true)
     print(f"True params, (transformed) are {theta_true}")
 
+    true_values = {
+        **latent_truth,
+        **{f"log_phi_{k+1}": np.log(ds.phi_k[k]) for k in range(K)},
+        "gamma": ds.true_params["gamma"],
+        "log_eta": np.log(ds.true_params["eta"]),
+        "delta": ds.true_params["delta"],
+        "mu_phi": ds.true_params["mu_phi"],
+        "log_sigma_phi": np.log(ds.true_params["sigma_phi"]),
+    }
 
     prior_type = config["priors"]["default"]
-    
+
     def log_post(theta):
-        return log_posterior_base(theta, ds.counts, ds.E_centers, ds.E_widths, prior_type)
+        return log_posterior_hierarchical(theta, ds.seasons, parameterization, prior_type)
 
     def grad_log_post(theta):
-        return grad_log_posterior_base(theta, ds.counts, ds.E_centers, ds.E_widths, prior_type)
-
-    theta_init = theta_true.copy()
-
+        return grad_log_posterior_hierarchical(theta, ds.seasons, parameterization, prior_type)
 
     rwmh_results = run_multiple_chains(
         run_rwmh,
-        theta_init=theta_init,
+        theta_init=theta_true,
         n_chains=int(test_cfg["n_chains"]),
         init_strategy=test_cfg["init_strategy"],
-        init_scale=float(test_cfg["init_scale_base"]),
+        init_scale=float(test_cfg["init_scale_hierarchical"]),
         rng=rng,
         log_posterior_fn=log_post,
         n_iterations=int(rwmh_cfg["n_iterations"]),
@@ -753,16 +841,12 @@ if __name__ == "__main__":
         ridge=float(test_cfg["preconditioner_ridge"]),
     )
 
-    print("\nEstimated dense preconditioner from RWMH:")
-    print(rwmh_cov)
-
-    
     mala_results = run_multiple_chains(
         run_mala,
-        theta_init=theta_init,
+        theta_init=theta_true,
         n_chains=int(test_cfg["n_chains"]),
         init_strategy=test_cfg["init_strategy"],
-        init_scale=float(test_cfg["init_scale_base"]),
+        init_scale=float(test_cfg["init_scale_hierarchical"]),
         rng=rng,
         log_posterior_fn=log_post,
         grad_log_posterior_fn=grad_log_post,
@@ -780,16 +864,32 @@ if __name__ == "__main__":
         normalize_precond=bool(mala_cfg["normalize_precond"]),
     )
 
-    print_diagnostics_multi({"RWMH": rwmh_results,"MALA": mala_results}, true_values = true_values)
-    
+    print_diagnostics_multi_hierarchical(
+        {"RWMH": rwmh_results, "MALA": mala_results},
+        parameterization=parameterization,
+        K=K,
+        latent_display=test_cfg["latent_display_diagnostics"],
+        true_values=true_values,
+    )
 
-    # print("SAMPLER COMPARISON")
-    # print_diagnostics([result_rwmh, result_mala])
+    traceplot_rwmh = test_cfg["traceplot_hierarchical_rwmh"]
+    traceplot_mala = test_cfg["traceplot_hierarchical_mala"]
+    if parameterization == "noncentered":
+        traceplot_rwmh = traceplot_rwmh.replace("centered", "noncentered")
+        traceplot_mala = traceplot_mala.replace("centered", "noncentered")
 
-    # saving traces
-    save_traceplots_multi(rwmh_results, test_cfg["traceplot_rwmh"])
-    save_traceplots_multi(mala_results, test_cfg["traceplot_mala"])
-    print("\nSaved traceplots to:")
-    print(f"  {test_cfg['traceplot_rwmh']}")
-    print(f"  {test_cfg['traceplot_mala']}")
-    
+    save_traceplots_multi_hierarchical(
+        rwmh_results,
+        traceplot_rwmh,
+        parameterization=parameterization,
+        K=K,
+        latent_display=test_cfg["latent_display_traceplots"],
+    )
+
+    save_traceplots_multi_hierarchical(
+        mala_results,
+        traceplot_mala,
+        parameterization=parameterization,
+        K=K,
+        latent_display=test_cfg["latent_display_traceplots"],
+    )

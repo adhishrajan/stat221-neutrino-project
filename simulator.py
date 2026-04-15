@@ -21,7 +21,7 @@ def signal_power_law(E, phi, gamma, E_widths) -> np.ndarray:
     Single power law signal, mu_i^signal = phi * (E_i/E_ref)^{-gamma} * dE_i
     We use the normalized energy E/E_ref to keep phi at a good scale.
     """
-    return phi * (E / E_REF)**(-gamma) * (E_widths / E_REF)
+    return phi * (E / E_REF)**(-gamma) * E_widths
 
 
 def signal_broken_power_law(E, phi, gamma1, gamma2, E_break, E_widths) -> np.ndarray:
@@ -37,23 +37,23 @@ def signal_broken_power_law(E, phi, gamma1, gamma2, E_break, E_widths) -> np.nda
         phi * E_norm**(-gamma1),
         A * E_norm**(-gamma2)
     )
-    return mu * (E_widths / E_REF)
+    return mu * E_widths
 
 
 def signal_cutoff(E, phi, gamma, E_cut, E_widths) -> np.ndarray:
     """
-    Power law with exponential cutoff, phi * (E/E_ref)^{-gamma} * exp(-E / E_cut) * dE/E_ref
+    Power law with exponential cutoff, phi * (E/E_ref)^{-gamma} * exp(-E / E_cut) * dE_i
     """
-    return phi * (E / E_REF)**(-gamma) * np.exp(-E / E_cut) * (E_widths / E_REF)
+    return phi * (E / E_REF)**(-gamma) * np.exp(-E / E_cut) * E_widths
 
 
 # BACKGROUND MODEL
 
 def background_atmospheric(E, eta, delta, E_widths) -> np.ndarray:
     """
-    Atmospheric background, eta * (E/E_ref)^{-delta} * dE/E_ref
+    Atmospheric background, eta * (E/E_ref)^{-delta} * dE_i
     """
-    return eta * (E / E_REF)**(-delta) * (E_widths / E_REF)
+    return eta * (E / E_REF)**(-delta) * E_widths
 
 
 # DATA CONTAINERS
@@ -89,9 +89,9 @@ class HierarchicalDataset:
 # Main generation functions
 
 def generate_single_season(
-    phi = 30.0,
+    phi = 1e-5,
     gamma = 2.5,
-    eta = 500.0,
+    eta = 1e-5,
     delta = 3.7,
     truth_model = "power_law",
     n_bins = 20,
@@ -99,9 +99,9 @@ def generate_single_season(
     E_max = 1e7,
     rng = None,
     # extra params for alternative truth models
-    gamma2 = 3.0,
-    E_break = 5e5,
-    E_cut = 3e6,
+    gamma2 = 2.8,
+    E_break = 3e4,
+    E_cut = 1e6,
 ) -> Dataset:
     """
     Generates a single season synthetic dataset.
@@ -153,10 +153,10 @@ def generate_single_season(
 
 def generate_hierarchical(
     K = 10,
-    mu_phi = np.log(30.0),
+    mu_phi = np.log(1e-5),
     sigma_phi = 0.3,
     gamma = 2.5,
-    eta = 500.0,
+    eta = 1e-5,
     delta = 3.7,
     truth_model = "power_law",
     n_bins = 20,
@@ -230,19 +230,53 @@ def summarize_dataset(ds) -> None:
 
 
 if __name__ == "__main__":
-    rng = np.random.default_rng(42)
+    from load_config import load_config
+
+    config = load_config()
+    test_cfg = config["testing"]
+    signal_cfg = config["signal"]
+    background_cfg = config["background"]
+    bins_cfg = config["energy_bins"]
+    hier_cfg = config["hierarchical"]
+
+    rng = np.random.default_rng(int(test_cfg["seed_simulator"]))
     print("SINGLE-SEASON DATASETS")
 
-    for model in ["power_law", "broken_power_law", "cutoff"]:
+    for model in test_cfg["truth_models"]:
         print(f"\n {model} ")
-        ds = generate_single_season(truth_model=model, rng=rng)
+        ds = generate_single_season(
+            phi=float(signal_cfg["phi"]),
+            gamma=float(signal_cfg["gamma"]),
+            eta=float(background_cfg["eta"]),
+            delta=float(background_cfg["delta"]),
+            truth_model=model,
+            n_bins=int(bins_cfg["n_bins"]),
+            E_min=float(bins_cfg["E_min"]),
+            E_max=float(bins_cfg["E_max"]),
+            gamma2=float(signal_cfg["gamma2"]),
+            E_break=float(signal_cfg["E_break"]),
+            E_cut=float(signal_cfg["E_cut"]),
+            rng=rng,
+        )
         summarize_dataset(ds)
 
     print("\n" + "=" * 60)
-    print("HIERARCHICAL DATASET (K=10 seasons)")
+    print(f"HIERARCHICAL DATASET (K={int(hier_cfg['K'])} seasons)")
     print("=" * 60)
 
-    hds = generate_hierarchical(K=10, rng=rng)
+    hds = generate_hierarchical(
+        K=int(hier_cfg["K"]),
+        mu_phi=float(hier_cfg["mu_phi"]),
+        sigma_phi=float(hier_cfg["sigma_phi"]),
+        gamma=float(hier_cfg["gamma"]),
+        eta=float(hier_cfg["eta"]),
+        delta=float(hier_cfg["delta"]),
+        truth_model=hier_cfg["truth_model"],
+        n_bins=int(bins_cfg["n_bins"]),
+        E_min=float(bins_cfg["E_min"]),
+        E_max=float(bins_cfg["E_max"]),
+        rng=rng,
+    )
     print(f"\nShared params: gamma={hds.true_params['gamma']}, "
           f"eta={hds.true_params['eta']:.2e}, delta={hds.true_params['delta']}")
     print(f"Population: mu_phi={hds.true_params['mu_phi']:.2f}, "
