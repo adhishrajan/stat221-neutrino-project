@@ -750,34 +750,59 @@ def save_traceplots_multi_hierarchical(results: list[MCMCResult],filename: str,p
 # test
 if __name__ == "__main__":
     from simulator import generate_hierarchical
-    from posteriors import *
+    from posteriors import log_posterior_hierarchical, grad_log_posterior_hierarchical
+    from load_config import load_config
 
-    rng = np.random.default_rng(221)
+    config = load_config()
+    test_cfg = config["testing"]
+    hier_cfg = config["hierarchical"]
+    rwmh_cfg = config["samplers_hierarchical"]["RWMH"]
+    mala_cfg = config["samplers_hierarchical"]["MALA"]
+    parameterization = test_cfg["hierarchical_parameterization"]
+
+    rng = np.random.default_rng(int(test_cfg["seed_hierarchical_samplers"]))
 
     print("Generating data")
-    ds = generate_hierarchical(rng=rng, truth_model = "power_law")
+    ds = generate_hierarchical(
+        K=int(hier_cfg["K"]),
+        mu_phi=float(hier_cfg["mu_phi"]),
+        sigma_phi=float(hier_cfg["sigma_phi"]),
+        gamma=float(hier_cfg["gamma"]),
+        eta=float(hier_cfg["eta"]),
+        delta=float(hier_cfg["delta"]),
+        truth_model=hier_cfg["truth_model"],
+        rng=rng,
+    )
     K = len(ds.seasons)
-    print(f"K = {K}, "
-          f"True means = {ds.phi_k}")
+    print(f"K = {K}, True means = {ds.phi_k}")
 
+    if parameterization == "centered":
+        print("CENTERED PARAMETERIZATION")
+        param_names = [f"log_phi_{i+1}" for i in range(K)]
+        theta_true = np.log(ds.phi_k).tolist()
+        latent_truth = {f"log_phi_{k+1}": np.log(ds.phi_k[k]) for k in range(K)}
+    elif parameterization == "noncentered":
+        print("NONCENTERED PARAMETERIZATION")
+        param_names = [f"z_{i+1}" for i in range(K)]
+        z_true = (np.log(ds.phi_k) - ds.true_params["mu_phi"]) / ds.true_params["sigma_phi"]
+        theta_true = z_true.tolist()
+        latent_truth = {f"z_{k+1}": z_true[k] for k in range(K)}
+    else:
+        raise ValueError(f"Unknown parameterization: {parameterization}")
 
-    # CENTERED PARAMETERIZATION
-    print("CENTERED PARAMETERIZATION")
-    param_names_centered = []
+    param_names.extend(["gamma", "log_eta", "delta", "mu_phi", "log_sigma_phi"])
+    theta_true.extend([
+        ds.true_params["gamma"],
+        np.log(ds.true_params["eta"]),
+        ds.true_params["delta"],
+        ds.true_params["mu_phi"],
+        np.log(ds.true_params["sigma_phi"]),
+    ])
+    theta_true = np.array(theta_true)
+    print(f"True params, (transformed) are {theta_true}")
 
-    for i in range(K):
-        param_names_centered.append(f"log_phi_{i+1}")
-    
-    param_names_centered.extend(["gamma", "log_eta", "delta", "mu_phi", "log_sigma_phi"])
-    param_names_centered
-
-    theta_true_centered = np.log(ds.phi_k).tolist()
-    theta_true_centered.extend([ds.true_params["gamma"], np.log(ds.true_params["eta"]),
-                       ds.true_params["delta"], ds.true_params["mu_phi"], np.log(ds.true_params["sigma_phi"])])
-    theta_true_centered = np.array(theta_true_centered)
-    print(f"True params, (transformed) are {theta_true_centered}")
-    
     true_values = {
+        **latent_truth,
         **{f"log_phi_{k+1}": np.log(ds.phi_k[k]) for k in range(K)},
         "gamma": ds.true_params["gamma"],
         "log_eta": np.log(ds.true_params["eta"]),
@@ -786,77 +811,85 @@ if __name__ == "__main__":
         "log_sigma_phi": np.log(ds.true_params["sigma_phi"]),
     }
 
-    prior_type = "lognormal_gamma"
-    
-    def log_post_centered(theta):
-        return log_posterior_hierarchical(theta, ds.seasons, "centered", prior_type)
-    
-    def grad_log_post_centered(theta):
-        return grad_log_posterior_hierarchical(theta, ds.seasons, "centered", prior_type)
+    prior_type = config["priors"]["default"]
+
+    def log_post(theta):
+        return log_posterior_hierarchical(theta, ds.seasons, parameterization, prior_type)
+
+    def grad_log_post(theta):
+        return grad_log_posterior_hierarchical(theta, ds.seasons, parameterization, prior_type)
 
     rwmh_results = run_multiple_chains(
         run_rwmh,
-        theta_init=theta_true_centered,
-        n_chains=4,
-        init_strategy="jitter",
-        init_scale=0.001,
+        theta_init=theta_true,
+        n_chains=int(test_cfg["n_chains"]),
+        init_strategy=test_cfg["init_strategy"],
+        init_scale=float(test_cfg["init_scale_hierarchical"]),
         rng=rng,
-        log_posterior_fn=log_post_centered,
-        n_iterations=100000,
-        n_burnin=20000,
-        adapt_proposal=True,
-        param_names=param_names_centered,
+        log_posterior_fn=log_post,
+        n_iterations=int(rwmh_cfg["n_iterations"]),
+        n_burnin=int(rwmh_cfg["n_burnin"]),
+        adapt_proposal=bool(rwmh_cfg["adapt_proposal"]),
+        adapt_until=int(rwmh_cfg["adapt_until"]),
+        adapt_interval=int(rwmh_cfg["adapt_interval"]),
+        target_accept=float(rwmh_cfg["target_accept"]),
+        param_names=param_names,
     )
 
-    rwmh_cov = estimate_dense_precond_from_rwmh(rwmh_results, ridge=1e-6)
+    rwmh_cov = estimate_dense_precond_from_rwmh(
+        rwmh_results,
+        ridge=float(test_cfg["preconditioner_ridge"]),
+    )
 
     mala_results = run_multiple_chains(
         run_mala,
-        theta_init=theta_true_centered,
-        n_chains=4,
-        init_strategy="jitter",
-        init_scale=0.001,
+        theta_init=theta_true,
+        n_chains=int(test_cfg["n_chains"]),
+        init_strategy=test_cfg["init_strategy"],
+        init_scale=float(test_cfg["init_scale_hierarchical"]),
         rng=rng,
-        log_posterior_fn=log_post_centered,
-        grad_log_posterior_fn=grad_log_post_centered,
-        n_iterations=100000,
-        n_burnin=20000,
-        step_size=1e-3,
-        adapt_step=True,
-        adapt_until=20000,
-        target_accept=0.65,
-        param_names=param_names_centered,
+        log_posterior_fn=log_post,
+        grad_log_posterior_fn=grad_log_post,
+        n_iterations=int(mala_cfg["n_iterations"]),
+        n_burnin=int(mala_cfg["n_burnin"]),
+        step_size=float(mala_cfg["step_size"]),
+        adapt_step=bool(mala_cfg["adapt_step"]),
+        adapt_until=int(mala_cfg["adapt_until"]),
+        adapt_interval=int(mala_cfg["adapt_interval"]),
+        target_accept=float(mala_cfg["target_accept"]),
+        param_names=param_names,
         precond=rwmh_cov,
-        adapt_precond=False,
-        precond_type="dense",
-        normalize_precond=True,
+        adapt_precond=bool(mala_cfg["adapt_precond"]),
+        precond_type=mala_cfg["precond_type"],
+        normalize_precond=bool(mala_cfg["normalize_precond"]),
     )
 
     print_diagnostics_multi_hierarchical(
         {"RWMH": rwmh_results, "MALA": mala_results},
-        parameterization="centered",
-        K=10,
-        latent_display="raw",
+        parameterization=parameterization,
+        K=K,
+        latent_display=test_cfg["latent_display_diagnostics"],
         true_values=true_values,
     )
-    
+
+    traceplot_rwmh = test_cfg["traceplot_hierarchical_rwmh"]
+    traceplot_mala = test_cfg["traceplot_hierarchical_mala"]
+    if parameterization == "noncentered":
+        traceplot_rwmh = traceplot_rwmh.replace("centered", "noncentered")
+        traceplot_mala = traceplot_mala.replace("centered", "noncentered")
+
     save_traceplots_multi_hierarchical(
         rwmh_results,
-        "Figures/traceplots_hierarchical_rwmh_centered.png",
-        parameterization="centered",
-        K=10,
-        latent_display="log_phi",
-    )
-    
-    save_traceplots_multi_hierarchical(
-        mala_results,
-        "Figures/traceplots_hierarchical_mala_centered.png",
-        parameterization="centered",
-        K=10,
-        latent_display="log_phi",
+        traceplot_rwmh,
+        parameterization=parameterization,
+        K=K,
+        latent_display=test_cfg["latent_display_traceplots"],
     )
 
-    
-    # NONCENTERED PARAMETERIZATION
-    print(f"\n\nNONCENTERED PARAMETERIZATION")
-    
+    save_traceplots_multi_hierarchical(
+        mala_results,
+        traceplot_mala,
+        parameterization=parameterization,
+        K=K,
+        latent_display=test_cfg["latent_display_traceplots"],
+    )

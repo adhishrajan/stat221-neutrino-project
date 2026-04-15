@@ -1,0 +1,98 @@
+# Configuration for neutrino analysis
+# Using effective amplitudes (no detector effects modeled)
+
+energy_bins:
+  n_bins: 20
+  E_min: 1e4
+  E_max: 1e7
+
+# Reference energy (100 TeV in GeV)
+E_REF: 1e5
+
+signal:
+  phi: 1e-5
+  gamma: 2.5
+  gamma2: 2.8
+  E_break: 3e4
+  E_cut: 1e6
+
+background:
+  eta: 1e-5
+  delta: 3.7
+
+samplers:
+  RWMH:
+    n_iterations: 20000
+    n_burnin: 5000
+    adapt_proposal: true
+    adapt_until: 5000
+    adapt_interval: 200
+    target_accept: 0.234
+
+  MALA:
+    n_iterations: 30000
+    n_burnin: 10000
+    step_size: 1e-4
+    adapt_step: true
+    adapt_until: 10000
+    adapt_interval: 200
+    target_accept: 0.57
+    precond_type: dense
+    normalize_precond: true
+    adapt_precond: false
+
+samplers_hierarchical:
+  RWMH:
+    n_iterations: 100000
+    n_burnin: 20000
+    adapt_proposal: true
+    adapt_until: 20000
+    adapt_interval: 200
+    target_accept: 0.234
+
+  MALA:
+    n_iterations: 100000
+    n_burnin: 20000
+    step_size: 1e-3
+    adapt_step: true
+    adapt_until: 20000
+    adapt_interval: 200
+    target_accept: 0.65
+    precond_type: dense
+    normalize_precond: true
+    adapt_precond: false
+
+priors:
+  default: lognormal_gamma
+
+hierarchical:
+  K: 10
+  mu_phi: -11.512925464970229
+  sigma_phi: 0.3
+  gamma: 2.5
+  eta: 1e-5
+  delta: 3.7
+  truth_model: power_law
+
+testing:
+  seed_simulator: 42
+  seed_posteriors: 42
+  seed_samplers: 221
+  seed_hierarchical_samplers: 221
+  truth_model: power_law
+  truth_models: [power_law, broken_power_law, cutoff]
+  base_prior_types: [weakly, flat, lognormal_gamma]
+  hierarchical_prior_types: [weakly, flat, lognormal_gamma]
+  theta_perturb_scale: 0.1
+  n_chains: 4
+  init_strategy: jitter
+  init_scale_base: 0.05
+  init_scale_hierarchical: 0.001
+  preconditioner_ridge: 1e-6
+  hierarchical_parameterization: centered
+  latent_display_diagnostics: raw
+  latent_display_traceplots: log_phi
+  traceplot_rwmh: traceplots_rwmh.png
+  traceplot_mala: traceplots_mala.png
+  traceplot_hierarchical_rwmh: traceplots_hierarchical_rwmh_centered.png
+  traceplot_hierarchical_mala: traceplots_hierarchical_mala_centered.png

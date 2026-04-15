@@ -126,11 +126,10 @@ def grad_log_posterior_base(theta_transformed, counts, E, E_widths, prior_type =
     eta = np.exp(log_eta)
 
     E_norm = E / E_REF
-    dE_norm = E_widths / E_REF
 
     # Expected counts and their components
-    mu_sig = phi * E_norm**(-gamma_val) * dE_norm
-    mu_bg = eta * E_norm**(-delta_val) * dE_norm
+    mu_sig = phi * E_norm**(-gamma_val) * E_widths
+    mu_bg = eta * E_norm**(-delta_val) * E_widths
     mu = mu_sig + mu_bg
     if np.any(mu <= 0):
         return np.zeros(4)
@@ -141,18 +140,18 @@ def grad_log_posterior_base(theta_transformed, counts, E, E_widths, prior_type =
     # grad of log likelihood
 
     # d/d(log_phi) = d/d(phi) * phi
-    # d(log L)/d(phi) = sum_i ratio_i * E_norm_i^{-gamma} * dE_norm_i
-    dL_dphi = np.sum(ratio * E_norm**(-gamma_val) * dE_norm)
+    # d(log L)/d(phi) = sum_i ratio_i * E_norm_i^{-gamma} * E_widths_i
+    dL_dphi = np.sum(ratio * E_norm**(-gamma_val) * E_widths)
     dL_dlog_phi = dL_dphi * phi
 
     # d/d(gamma)
-    # d(mu_sig)/d(gamma) = phi * E_norm^{-gamma} * (-log E_norm) * dE_norm
+    # d(mu_sig)/d(gamma) = phi * E_norm^{-gamma} * (-log E_norm) * E_widths
     # = mu_sig * (-log E_norm)
     dmu_dgamma = -mu_sig * np.log(E_norm)
     dL_dgamma = np.sum(ratio * dmu_dgamma)
 
     # d/d(log_eta) = d/d(eta) * eta
-    dL_deta = np.sum(ratio * E_norm**(-delta_val) * dE_norm)
+    dL_deta = np.sum(ratio * E_norm**(-delta_val) * E_widths)
     dL_dlog_eta = dL_deta * eta
 
     # d/d(delta)
@@ -403,10 +402,9 @@ def grad_log_posterior_hierarchical(theta, seasons, parameterization="centered",
 
     for k, ds in enumerate(seasons):
         E_norm = ds.E_centers / E_REF
-        dE_norm = ds.E_widths / E_REF
 
-        mu_sig = phi_k[k] * E_norm**(-gamma_val) * dE_norm
-        mu_bg = eta * E_norm**(-delta_val) * dE_norm
+        mu_sig = phi_k[k] * E_norm**(-gamma_val) * ds.E_widths
+        mu_bg = eta * E_norm**(-delta_val) * ds.E_widths
         mu = mu_sig + mu_bg
 
         if np.any(mu <= 0):
@@ -519,12 +517,33 @@ def verify_gradient_hierarchical(theta, seasons, parameterization = "centered", 
 # test
 if __name__ == "__main__":
     from simulator import generate_single_season, generate_hierarchical
+    from load_config import load_config
 
-    rng = np.random.default_rng(42)
+    config = load_config()
+    test_cfg = config["testing"]
+    signal_cfg = config["signal"]
+    background_cfg = config["background"]
+    bins_cfg = config["energy_bins"]
+    hier_cfg = config["hierarchical"]
+
+    rng = np.random.default_rng(int(test_cfg["seed_posteriors"]))
 
     print("BASE MODEL Log posterior and gradient check")
 
-    ds = generate_single_season(rng=rng, truth_model = "power_law")
+    ds = generate_single_season(
+        phi=float(signal_cfg["phi"]),
+        gamma=float(signal_cfg["gamma"]),
+        eta=float(background_cfg["eta"]),
+        delta=float(background_cfg["delta"]),
+        truth_model=test_cfg["truth_model"],
+        n_bins=int(bins_cfg["n_bins"]),
+        E_min=float(bins_cfg["E_min"]),
+        E_max=float(bins_cfg["E_max"]),
+        gamma2=float(signal_cfg["gamma2"]),
+        E_break=float(signal_cfg["E_break"]),
+        E_cut=float(signal_cfg["E_cut"]),
+        rng=rng,
+    )
 
     # true params in the transformed space
     theta_true = np.array([
@@ -534,76 +553,44 @@ if __name__ == "__main__":
         ds.true_params["delta"],
     ])
 
-    # Validating Weak Prior Case
-    print("WEAK PRIOR CASE")
-    lp = log_posterior_base(theta_true, ds.counts, ds.E_centers, ds.E_widths, "weakly")
-    print(f"Log posterior at true params, {lp:.2f}")
+    for prior_type in test_cfg["base_prior_types"]:
+        print(f"{prior_type.upper()} PRIOR CASE")
+        lp = log_posterior_base(theta_true, ds.counts, ds.E_centers, ds.E_widths, prior_type)
+        print(f"Log posterior at true params, {lp:.2f}")
 
-    # weak prior gradient verification
-    result = verify_gradient(theta_true, ds.counts, ds.E_centers, ds.E_widths, "weakly")
-    print(f"\nGradient verification at true params.")
-    print(f"Analytic: {result['analytic']}")
-    print(f"Numerical: {result['numerical']}")
-    print(f"Abs diff: {result['abs_diff']}")
-    print(f"Max abs diff: {result['max_abs_diff']:.2e}")
+        result = verify_gradient(theta_true, ds.counts, ds.E_centers, ds.E_widths, prior_type)
+        print(f"\nGradient verification at true params.")
+        print(f"Analytic: {result['analytic']}")
+        print(f"Numerical: {result['numerical']}")
+        print(f"Abs diff: {result['abs_diff']}")
+        print(f"Max abs diff: {result['max_abs_diff']:.2e}")
 
-    theta_perturbed = theta_true + rng.normal(0, 0.1, size=4)
-    result2 = verify_gradient(theta_perturbed, ds.counts, ds.E_centers, ds.E_widths, "weakly")
-    print(f"\nGradient check at perturbed point.")
-    print(f"Analytic: {result2['analytic']}")
-    print(f"Numerical: {result2['numerical']}")
-    print(f"Abs diff: {result2['abs_diff']}")
-    print(f"Max abs diff: {result2['max_abs_diff']:.2e}\n\n")
-
-    # Validating Flat Prior Case
-    print("FLAT PRIOR CASE")
-    lp = log_posterior_base(theta_true, ds.counts, ds.E_centers, ds.E_widths, "flat")
-    print(f"Log posterior at true params, {lp:.2f}")
-    
-    # flat prior gradient verification
-    result = verify_gradient(theta_true, ds.counts, ds.E_centers, ds.E_widths, "flat")
-    print(f"\nGradient verification at true params.")
-    print(f"Analytic: {result['analytic']}")
-    print(f"Numerical: {result['numerical']}")
-    print(f"Abs diff: {result['abs_diff']}")
-    print(f"Max abs diff: {result['max_abs_diff']:.2e}")
-
-    theta_perturbed = theta_true + rng.normal(0, 0.1, size=4)
-    result2 = verify_gradient(theta_perturbed, ds.counts, ds.E_centers, ds.E_widths, "flat")
-    print(f"\nGradient check at perturbed point.")
-    print(f"Analytic: {result2['analytic']}")
-    print(f"Numerical: {result2['numerical']}")
-    print(f"Abs diff: {result2['abs_diff']}")
-    print(f"Max abs diff: {result2['max_abs_diff']:.2e}\n\n")
-
-    # Validating lognormal_gamma Prior Case
-    print("LOG NORMAL PRIOR CASE")
-    lp = log_posterior_base(theta_true, ds.counts, ds.E_centers, ds.E_widths, "lognormal_gamma")
-    print(f"Log posterior at true params, {lp:.2f}")
-    
-    # lognormal_gamma prior gradient verification
-    result = verify_gradient(theta_true, ds.counts, ds.E_centers, ds.E_widths, "lognormal_gamma")
-    print(f"\nGradient verification at true params.")
-    print(f"Analytic: {result['analytic']}")
-    print(f"Numerical: {result['numerical']}")
-    print(f"Abs diff: {result['abs_diff']}")
-    print(f"Max abs diff: {result['max_abs_diff']:.2e}")
-
-    theta_perturbed = theta_true + rng.normal(0, 0.1, size=4)
-    result2 = verify_gradient(theta_perturbed, ds.counts, ds.E_centers, ds.E_widths, "lognormal_gamma")
-    print(f"\nGradient check at perturbed point.")
-    print(f"Analytic: {result2['analytic']}")
-    print(f"Numerical: {result2['numerical']}")
-    print(f"Abs diff: {result2['abs_diff']}")
-    print(f"Max abs diff: {result2['max_abs_diff']:.2e}\n\n")
+        theta_perturbed = theta_true + rng.normal(
+            0,
+            float(test_cfg["theta_perturb_scale"]),
+            size=theta_true.size,
+        )
+        result2 = verify_gradient(theta_perturbed, ds.counts, ds.E_centers, ds.E_widths, prior_type)
+        print(f"\nGradient check at perturbed point.")
+        print(f"Analytic: {result2['analytic']}")
+        print(f"Numerical: {result2['numerical']}")
+        print(f"Abs diff: {result2['abs_diff']}")
+        print(f"Max abs diff: {result2['max_abs_diff']:.2e}\n\n")
 
     # test hierarchical model
     print("HIERARCHICAL MODEL")
 
-    hds = generate_hierarchical(K=10, rng=rng)
+    hds = generate_hierarchical(
+        K=int(hier_cfg["K"]),
+        mu_phi=float(hier_cfg["mu_phi"]),
+        sigma_phi=float(hier_cfg["sigma_phi"]),
+        gamma=float(hier_cfg["gamma"]),
+        eta=float(hier_cfg["eta"]),
+        delta=float(hier_cfg["delta"]),
+        truth_model=hier_cfg["truth_model"],
+        rng=rng,
+    )
     K = len(hds.seasons)
-   
-    print("WEAK PRIOR CASE")
     # centered parameterization theta = [log_phi_1,...,log_phi_K, gamma, log_eta, delta, mu_phi, log_sigma_phi]
     theta_hier = np.concatenate([
         np.log(hds.phi_k),
@@ -615,14 +602,6 @@ if __name__ == "__main__":
     ])
     
     
-    lp_c = log_posterior_hierarchical(theta_hier, hds.seasons, "centered", "weakly")
-    print(f"Log posterior (centered) at true params: {lp_c:.2f}")
-
-    result_c = verify_gradient_hierarchical(theta_hier, hds.seasons, "centered", "weakly")
-    print(f"Gradient check at true params.")
-    print(f"Max abs diff: {result_c['max_abs_diff']:.2e}\n\n")
-
-    # non centered, we convert to z_k
     sigma_phi = hds.true_params["sigma_phi"]
     mu_phi = hds.true_params["mu_phi"]
     z_k = (np.log(hds.phi_k) - mu_phi) / sigma_phi
@@ -636,42 +615,17 @@ if __name__ == "__main__":
          np.log(sigma_phi)],
     ])
 
-    lp_nc = log_posterior_hierarchical(theta_nc, hds.seasons, "noncentered", "weakly")
-    print(f"Log posterior (non centered) at true params: {lp_nc:.2f}")
-    #print(f"\nBoth finite? {np.isfinite(lp_c) and np.isfinite(lp_nc)}")
+    for prior_type in test_cfg["hierarchical_prior_types"]:
+        print(f"{prior_type.upper()} PRIOR CASE")
 
-    result_nc = verify_gradient_hierarchical(theta_hier, hds.seasons, "noncentered", "weakly")
-    print(f"Gradient check at true params.")
-    print(f"Max abs diff: {result_nc['max_abs_diff']:.2e}\n")
+        lp_c = log_posterior_hierarchical(theta_hier, hds.seasons, "centered", prior_type)
+        print(f"Log posterior (centered) at true params: {lp_c:.2f}")
+        result_c = verify_gradient_hierarchical(theta_hier, hds.seasons, "centered", prior_type)
+        print(f"Gradient check at true params.")
+        print(f"Max abs diff: {result_c['max_abs_diff']:.2e}")
 
-    print("FLAT PRIOR CASE")
-    lp_c = log_posterior_hierarchical(theta_hier, hds.seasons, "centered", "flat")
-    print(f"Log posterior (centered) at true params: {lp_c:.2f}")
-
-    result_c = verify_gradient_hierarchical(theta_hier, hds.seasons, "centered", "flat")
-    print(f"Gradient check at true params.")
-    print(f"Max abs diff: {result_c['max_abs_diff']:.2e}\n")
-
-    lp_nc = log_posterior_hierarchical(theta_nc, hds.seasons, "noncentered", "flat")
-    print(f"Log posterior (non centered) at true params: {lp_nc:.2f}")
-    #print(f"\nBoth finite? {np.isfinite(lp_c) and np.isfinite(lp_nc)}")
-
-    result_nc = verify_gradient_hierarchical(theta_hier, hds.seasons, "noncentered", "flat")
-    print(f"Gradient check at true params.")
-    print(f"Max abs diff: {result_nc['max_abs_diff']:.2e}\n\n")
-
-    print("LOG NORMAL CASE")
-    lp_c = log_posterior_hierarchical(theta_hier, hds.seasons, "centered", "lognormal_gamma")
-    print(f"Log posterior (centered) at true params: {lp_c:.2f}")
-
-    result_c = verify_gradient_hierarchical(theta_hier, hds.seasons, "centered", "lognormal_gamma")
-    print(f"Gradient check at true params.")
-    print(f"Max abs diff: {result_c['max_abs_diff']:.2e}\n")
-
-    lp_nc = log_posterior_hierarchical(theta_nc, hds.seasons, "noncentered", "lognormal_gamma")
-    print(f"Log posterior (non centered) at true params: {lp_nc:.2f}")
-    #print(f"\nBoth finite? {np.isfinite(lp_c) and np.isfinite(lp_nc)}")
-
-    result_nc = verify_gradient_hierarchical(theta_hier, hds.seasons, "noncentered", "lognormal_gamma")
-    print(f"Gradient check at true params.")
-    print(f"Max abs diff: {result_nc['max_abs_diff']:.2e}\n\n")
+        lp_nc = log_posterior_hierarchical(theta_nc, hds.seasons, "noncentered", prior_type)
+        print(f"Log posterior (non centered) at true params: {lp_nc:.2f}")
+        result_nc = verify_gradient_hierarchical(theta_nc, hds.seasons, "noncentered", prior_type)
+        print(f"Gradient check at true params.")
+        print(f"Max abs diff: {result_nc['max_abs_diff']:.2e}\n")

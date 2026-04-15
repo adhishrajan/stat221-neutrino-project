@@ -672,11 +672,32 @@ def save_traceplots_multi(results: list[MCMCResult], filename: str) -> None:
 if __name__ == "__main__":
     from simulator import generate_single_season
     from posteriors import log_posterior_base, grad_log_posterior_base
+    from load_config import load_config
 
-    rng = np.random.default_rng(221)
+    config = load_config()
+    test_cfg = config["testing"]
+    signal_cfg = config["signal"]
+    background_cfg = config["background"]
+    bins_cfg = config["energy_bins"]
+    rwmh_cfg = config["samplers"]["RWMH"]
+    mala_cfg = config["samplers"]["MALA"]
 
+    rng = np.random.default_rng(int(test_cfg["seed_samplers"]))
     print("Generating data")
-    ds = generate_single_season(rng=rng)
+    ds = generate_single_season(
+        phi=float(signal_cfg["phi"]),
+        gamma=float(signal_cfg["gamma"]),
+        eta=float(background_cfg["eta"]),
+        delta=float(background_cfg["delta"]),
+        truth_model=test_cfg["truth_model"],
+        n_bins=int(bins_cfg["n_bins"]),
+        E_min=float(bins_cfg["E_min"]),
+        E_max=float(bins_cfg["E_max"]),
+        gamma2=float(signal_cfg["gamma2"]),
+        E_break=float(signal_cfg["E_break"]),
+        E_cut=float(signal_cfg["E_cut"]),
+        rng=rng,
+    )
     print(f"Total counts: {ds.counts.sum()}, "
           f"Signal: {ds.mu_signal.sum():.0f}, "
           f"Background: {ds.mu_background.sum():.0f}")
@@ -699,7 +720,7 @@ if __name__ == "__main__":
     print(f"True params, (transformed) are {theta_true}")
 
 
-    prior_type = "lognormal_gamma"
+    prior_type = config["priors"]["default"]
     
     def log_post(theta):
         return log_posterior_base(theta, ds.counts, ds.E_centers, ds.E_widths, prior_type)
@@ -707,25 +728,30 @@ if __name__ == "__main__":
     def grad_log_post(theta):
         return grad_log_posterior_base(theta, ds.counts, ds.E_centers, ds.E_widths, prior_type)
 
-    # start near true values
-    theta_init = theta_true + rng.normal(0, 0.1, size=4)
+    theta_init = theta_true.copy()
 
 
     rwmh_results = run_multiple_chains(
         run_rwmh,
         theta_init=theta_init,
-        n_chains=4,
-        init_strategy="jitter",
-        init_scale=0.05,
+        n_chains=int(test_cfg["n_chains"]),
+        init_strategy=test_cfg["init_strategy"],
+        init_scale=float(test_cfg["init_scale_base"]),
         rng=rng,
         log_posterior_fn=log_post,
-        n_iterations=20000,
-        n_burnin=5000,
-        adapt_proposal=True,
+        n_iterations=int(rwmh_cfg["n_iterations"]),
+        n_burnin=int(rwmh_cfg["n_burnin"]),
+        adapt_proposal=bool(rwmh_cfg["adapt_proposal"]),
+        adapt_until=int(rwmh_cfg["adapt_until"]),
+        adapt_interval=int(rwmh_cfg["adapt_interval"]),
+        target_accept=float(rwmh_cfg["target_accept"]),
         param_names=param_names,
     )
 
-    rwmh_cov = estimate_dense_precond_from_rwmh(rwmh_results, ridge=1e-6)
+    rwmh_cov = estimate_dense_precond_from_rwmh(
+        rwmh_results,
+        ridge=float(test_cfg["preconditioner_ridge"]),
+    )
 
     print("\nEstimated dense preconditioner from RWMH:")
     print(rwmh_cov)
@@ -734,23 +760,24 @@ if __name__ == "__main__":
     mala_results = run_multiple_chains(
         run_mala,
         theta_init=theta_init,
-        n_chains=4,
-        init_strategy="jitter",
-        init_scale=0.05,
+        n_chains=int(test_cfg["n_chains"]),
+        init_strategy=test_cfg["init_strategy"],
+        init_scale=float(test_cfg["init_scale_base"]),
         rng=rng,
         log_posterior_fn=log_post,
         grad_log_posterior_fn=grad_log_post,
-        n_iterations=20000,
-        n_burnin=5000,
-        step_size=1e-4,
-        adapt_step=True,
-        adapt_until=5000,
-        target_accept=0.57,
+        n_iterations=int(mala_cfg["n_iterations"]),
+        n_burnin=int(mala_cfg["n_burnin"]),
+        step_size=float(mala_cfg["step_size"]),
+        adapt_step=bool(mala_cfg["adapt_step"]),
+        adapt_until=int(mala_cfg["adapt_until"]),
+        adapt_interval=int(mala_cfg["adapt_interval"]),
+        target_accept=float(mala_cfg["target_accept"]),
         param_names=param_names,
         precond=rwmh_cov,
-        adapt_precond=False,
-        precond_type="dense",
-        normalize_precond=True,
+        adapt_precond=bool(mala_cfg["adapt_precond"]),
+        precond_type=mala_cfg["precond_type"],
+        normalize_precond=bool(mala_cfg["normalize_precond"]),
     )
 
     print_diagnostics_multi({"RWMH": rwmh_results,"MALA": mala_results}, true_values = true_values)
@@ -760,9 +787,9 @@ if __name__ == "__main__":
     # print_diagnostics([result_rwmh, result_mala])
 
     # saving traces
-    save_traceplots_multi(rwmh_results, "traceplots_rwmh.png")
-    save_traceplots_multi(mala_results, "traceplots_mala.png")
+    save_traceplots_multi(rwmh_results, test_cfg["traceplot_rwmh"])
+    save_traceplots_multi(mala_results, test_cfg["traceplot_mala"])
     print("\nSaved traceplots to:")
-    print("  traceplots_rwmh.png")
-    print("  traceplots_mala.png")
+    print(f"  {test_cfg['traceplot_rwmh']}")
+    print(f"  {test_cfg['traceplot_mala']}")
     
