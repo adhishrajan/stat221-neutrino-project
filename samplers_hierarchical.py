@@ -538,6 +538,9 @@ def transform_hierarchical_samples(stacked: np.ndarray, parameterization: str, K
         - "phi": always show phi_k
     """
     n_chains, n_samples, d = stacked.shape
+    if d not in (K + 5, K + 6):
+        raise ValueError(f"Unexpected hierarchical dimension d={d} for K={K}")
+    has_prompt = d == K + 6
     out = stacked.copy()
 
     if parameterization == "centered":
@@ -556,8 +559,10 @@ def transform_hierarchical_samples(stacked: np.ndarray, parameterization: str, K
     elif parameterization == "noncentered":
         # theta = [z_1,...,z_K,gamma,log_eta,delta,mu_phi,log_sigma_phi]
         z = stacked[:, :, :K]
-        mu_phi = stacked[:, :, K + 3]
-        log_sigma_phi = stacked[:, :, K + 4]
+        mu_idx = K + 4 if has_prompt else K + 3
+        lsig_idx = K + 5 if has_prompt else K + 4
+        mu_phi = stacked[:, :, mu_idx]
+        log_sigma_phi = stacked[:, :, lsig_idx]
         sigma_phi = np.exp(log_sigma_phi)
 
         if latent_display == "raw":
@@ -578,7 +583,10 @@ def transform_hierarchical_samples(stacked: np.ndarray, parameterization: str, K
         raise ValueError(f"Unknown parameterization: {parameterization}")
 
     # shared parameters
-    shared_names = ["gamma", "log_eta", "delta", "mu_phi", "log_sigma_phi"]
+    shared_names = ["gamma", "log_eta", "delta"]
+    if has_prompt:
+        shared_names.append("log_eta_prompt")
+    shared_names.extend(["mu_phi", "log_sigma_phi"])
     names = latent_names + shared_names
 
     return out, names
@@ -756,6 +764,9 @@ if __name__ == "__main__":
     config = load_config()
     test_cfg = config["testing"]
     hier_cfg = config["hierarchical"]
+    atmo_cfg = config["atmospheric_realism"]
+    det_cfg = config["detector_response"]
+    phys_prior_cfg = config["priors"]["physics"]
     rwmh_cfg = config["samplers_hierarchical"]["RWMH"]
     mala_cfg = config["samplers_hierarchical"]["MALA"]
     parameterization = test_cfg["hierarchical_parameterization"]
@@ -771,6 +782,29 @@ if __name__ == "__main__":
         eta=float(hier_cfg["eta"]),
         delta=float(hier_cfg["delta"]),
         truth_model=hier_cfg["truth_model"],
+        atmo_model=atmo_cfg["model"],
+        prompt_fraction=float(atmo_cfg["prompt_fraction"]),
+        eta_prompt=float(config["background"].get("eta_prompt", float(hier_cfg["eta"]) * float(atmo_cfg["prompt_fraction"]))),
+        delta_prompt=float(atmo_cfg["delta_prompt"]),
+        E_knee=float(atmo_cfg["E_knee"]),
+        knee_sharpness=float(atmo_cfg["knee_sharpness"]),
+        prompt_prior_log_mean=float(atmo_cfg.get("prompt_prior_log_mean", np.log(1e-6))),
+        prompt_prior_log_sd=float(atmo_cfg.get("prompt_prior_log_sd", 1.0)),
+        prior_phi_log_mean=float(phys_prior_cfg["phi_log_mean"]),
+        prior_phi_log_sd=float(phys_prior_cfg["phi_log_sd"]),
+        prior_gamma_mean=float(phys_prior_cfg["gamma_mean"]),
+        prior_gamma_sd=float(phys_prior_cfg["gamma_sd"]),
+        prior_eta_log_mean=float(phys_prior_cfg["eta_log_mean"]),
+        prior_eta_log_sd=float(phys_prior_cfg["eta_log_sd"]),
+        prior_delta_mean=float(phys_prior_cfg["delta_mean"]),
+        prior_delta_sd=float(phys_prior_cfg["delta_sd"]),
+        detector_mode=det_cfg["mode"],
+        livetime_years=float(det_cfg["livetime_years"]),
+        sigma_log10=float(det_cfg["sigma_log10"]),
+        physical_flux_units=bool(det_cfg.get("physical_flux_units", False)),
+        hese75_aeff_allsky_path=det_cfg.get("hese75_aeff_allsky_path", None),
+        hese75_migration_path=det_cfg.get("hese75_migration_path", None),
+        hese75_sky_factor_sr=float(det_cfg.get("hese75_sky_factor_sr", 4.0 * np.pi)),
         rng=rng,
     )
     K = len(ds.seasons)
@@ -790,11 +824,19 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown parameterization: {parameterization}")
 
-    param_names.extend(["gamma", "log_eta", "delta", "mu_phi", "log_sigma_phi"])
+    infer_prompt_eta = bool(ds.seasons[0].model_options.get("infer_prompt_eta", False))
+    param_names.extend(["gamma", "log_eta", "delta"])
+    if infer_prompt_eta:
+        param_names.append("log_eta_prompt")
+    param_names.extend(["mu_phi", "log_sigma_phi"])
     theta_true.extend([
         ds.true_params["gamma"],
         np.log(ds.true_params["eta"]),
         ds.true_params["delta"],
+    ])
+    if infer_prompt_eta:
+        theta_true.append(np.log(ds.seasons[0].true_params["eta_prompt"]))
+    theta_true.extend([
         ds.true_params["mu_phi"],
         np.log(ds.true_params["sigma_phi"]),
     ])
@@ -807,6 +849,7 @@ if __name__ == "__main__":
         "gamma": ds.true_params["gamma"],
         "log_eta": np.log(ds.true_params["eta"]),
         "delta": ds.true_params["delta"],
+        **({"log_eta_prompt": np.log(ds.seasons[0].true_params["eta_prompt"])} if infer_prompt_eta else {}),
         "mu_phi": ds.true_params["mu_phi"],
         "log_sigma_phi": np.log(ds.true_params["sigma_phi"]),
     }

@@ -1,0 +1,7 @@
+HESE 7.5-year Energy Resolution Summary
+=====================================
+Morphology: track
+Bins with finite sigma: 19/20
+Median sigma_log10: 0.2544
+Min/Max sigma_log10: 0.0600 / 0.5893
+Events used (weighted entries): 170344

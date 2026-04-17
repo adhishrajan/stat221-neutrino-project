@@ -1,24 +1,39 @@
-# Configuration for neutrino analysis
-# Using effective amplitudes (no detector effects modeled)
-
 energy_bins:
   n_bins: 20
   E_min: 1e4
   E_max: 1e7
 
-# Reference energy (100 TeV in GeV)
 E_REF: 1e5
 
 signal:
-  phi: 1e-5
+  phi: 2.06e-18
   gamma: 2.5
   gamma2: 2.8
   E_break: 3e4
   E_cut: 1e6
 
 background:
-  eta: 1e-5
+  eta: 1.0e-17
+  eta_prompt: 2.0e-18
   delta: 3.7
+
+atmospheric_realism:
+  model: conv_plus_prompt
+  prompt_fraction: 0.15
+  delta_prompt: 2.7
+  E_knee: 3e5
+  knee_sharpness: 4.0
+  prompt_prior_log_mean: -40.75338449333246
+  prompt_prior_log_sd: 1.0
+
+detector_response:
+  mode: hese75_derived
+  livetime_years: 7.5
+  sigma_log10: 0.15
+  physical_flux_units: true
+  hese75_aeff_allsky_path: data/icecube/hese75/derived/hese75_effective_area_trueE_allsky.txt
+  hese75_migration_path: data/icecube/hese75/derived/hese75_migration_all.txt
+  hese75_sky_factor_sr: 12.566370614359172
 
 samplers:
   RWMH:
@@ -63,14 +78,34 @@ samplers_hierarchical:
     adapt_precond: false
 
 priors:
-  default: lognormal_gamma
+  default: weakly
+  physics:
+    # Astrophysical single power-law normalization anchor:
+    # Phi0 ~= 2.06e-18 GeV^-1 cm^-2 s^-1 sr^-1 at 100 TeV
+    # Source: https://doi.org/10.1103/PhysRevD.91.022001
+    phi_log_mean: -40.72283611184711
+    # Broad weak prior width
+    phi_log_sd: 0.8
+    # Astrophysical spectral index anchor (rounded around IceCube diffuse fits).
+    # Source context: https://doi.org/10.1103/PhysRevD.91.022001
+    gamma_mean: 2.5
+    # Weakly informative spread
+    gamma_sd: 0.4
+    eta_log_mean: -39.14394658089878
+    # Weakly informative spread
+    eta_log_sd: 1.0
+    # Conventional atmospheric slope anchor around E^-3.7.
+    # Widely used atmospheric-neutrino approximation; HESE context above.
+    delta_mean: 3.7
+    # Weakly informative spread
+    delta_sd: 0.15
 
 hierarchical:
   K: 10
-  mu_phi: -11.512925464970229
+  mu_phi: -40.72283611184711
   sigma_phi: 0.3
   gamma: 2.5
-  eta: 1e-5
+  eta: 1.0e-17
   delta: 3.7
   truth_model: power_law
 

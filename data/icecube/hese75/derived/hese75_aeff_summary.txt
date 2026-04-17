@@ -1,0 +1,10 @@
+HESE 7.5-year Effective Area Sanity Summary
+============================================
+Energy bins: 20
+Nonzero 1D bins: 20/20 (100.0%)
+Peak Aeff_1D: 8.144e+02 m^2 at E~5.957e+06 GeV
+Aeff_1D min/max: 2.421e-04 / 8.144e+02 m^2
+Checks:
+- finite values: True
+- non-negative: True
+- has high-energy support (>1e6 GeV): True

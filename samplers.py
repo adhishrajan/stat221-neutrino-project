@@ -545,6 +545,9 @@ def posterior_summary_multi(results: list[MCMCResult], ci: float = 0.90, true_va
         elif name == "log_eta":
             x = np.exp(x)
             display_name = "eta"
+        elif name == "log_eta_prompt":
+            x = np.exp(x)
+            display_name = "eta_prompt"
         else:
             display_name = name
     
@@ -631,18 +634,25 @@ def print_diagnostics_multi(results_by_sampler: dict[str, list[MCMCResult]], ci:
         print("-" * 86)
         for name in param_names:
             s = summary[name]
-        
-            true_val = s["true"]
-            true_str = "NA" if true_val is None else f"{true_val:.4f}"
-        
+
+            def _fmt(x: Optional[float]) -> str:
+                if x is None:
+                    return "NA"
+                # Keep tiny positive scales like phi/eta visible.
+                if s["display_name"] in {"phi", "eta", "eta_prompt"}:
+                    return f"{x:.4e}"
+                return f"{x:.4f}"
+
+            true_str = _fmt(s["true"])
+
             print(
                 f"{s['display_name']:<12} "
                 f"{true_str:>12} "
-                f"{s['mean']:>12.4f} "
-                f"{s['sd']:>12.4f} "
-                f"{s['median']:>12.4f} "
-                f"{s['ci_lower']:>12.4f} "
-                f"{s['ci_upper']:>12.4f}"
+                f"{_fmt(s['mean']):>12} "
+                f"{_fmt(s['sd']):>12} "
+                f"{_fmt(s['median']):>12} "
+                f"{_fmt(s['ci_lower']):>12} "
+                f"{_fmt(s['ci_upper']):>12}"
             )
 
 # saves traceplots for each sampler, showing traces for each chain for each parameter
@@ -679,6 +689,9 @@ if __name__ == "__main__":
     signal_cfg = config["signal"]
     background_cfg = config["background"]
     bins_cfg = config["energy_bins"]
+    atmo_cfg = config["atmospheric_realism"]
+    det_cfg = config["detector_response"]
+    phys_prior_cfg = config["priors"]["physics"]
     rwmh_cfg = config["samplers"]["RWMH"]
     mala_cfg = config["samplers"]["MALA"]
 
@@ -696,37 +709,86 @@ if __name__ == "__main__":
         gamma2=float(signal_cfg["gamma2"]),
         E_break=float(signal_cfg["E_break"]),
         E_cut=float(signal_cfg["E_cut"]),
+        atmo_model=atmo_cfg["model"],
+        prompt_fraction=float(atmo_cfg["prompt_fraction"]),
+        eta_prompt=float(background_cfg.get("eta_prompt", float(background_cfg["eta"]) * float(atmo_cfg["prompt_fraction"]))),
+        delta_prompt=float(atmo_cfg["delta_prompt"]),
+        E_knee=float(atmo_cfg["E_knee"]),
+        knee_sharpness=float(atmo_cfg["knee_sharpness"]),
+        prompt_prior_log_mean=float(atmo_cfg.get("prompt_prior_log_mean", np.log(1e-6))),
+        prompt_prior_log_sd=float(atmo_cfg.get("prompt_prior_log_sd", 1.0)),
+        prior_phi_log_mean=float(phys_prior_cfg["phi_log_mean"]),
+        prior_phi_log_sd=float(phys_prior_cfg["phi_log_sd"]),
+        prior_gamma_mean=float(phys_prior_cfg["gamma_mean"]),
+        prior_gamma_sd=float(phys_prior_cfg["gamma_sd"]),
+        prior_eta_log_mean=float(phys_prior_cfg["eta_log_mean"]),
+        prior_eta_log_sd=float(phys_prior_cfg["eta_log_sd"]),
+        prior_delta_mean=float(phys_prior_cfg["delta_mean"]),
+        prior_delta_sd=float(phys_prior_cfg["delta_sd"]),
+        detector_mode=det_cfg["mode"],
+        livetime_years=float(det_cfg["livetime_years"]),
+        sigma_log10=float(det_cfg["sigma_log10"]),
+        physical_flux_units=bool(det_cfg.get("physical_flux_units", False)),
+        hese75_aeff_allsky_path=det_cfg.get("hese75_aeff_allsky_path", None),
+        hese75_migration_path=det_cfg.get("hese75_migration_path", None),
+        hese75_sky_factor_sr=float(det_cfg.get("hese75_sky_factor_sr", 4.0 * np.pi)),
         rng=rng,
     )
     print(f"Total counts: {ds.counts.sum()}, "
           f"Signal: {ds.mu_signal.sum():.0f}, "
           f"Background: {ds.mu_background.sum():.0f}")
 
-    param_names = ["log_phi", "gamma", "log_eta", "delta"]
-
-    theta_true = np.array([
-        np.log(ds.true_params["phi"]),
-        ds.true_params["gamma"],      
-        np.log(ds.true_params["eta"]),
-        ds.true_params["delta"],      
-    ])
+    infer_prompt_eta = bool(ds.model_options.get("infer_prompt_eta", False))
+    if infer_prompt_eta:
+        param_names = ["log_phi", "gamma", "log_eta", "delta", "log_eta_prompt"]
+        theta_true = np.array([
+            np.log(ds.true_params["phi"]),
+            ds.true_params["gamma"],
+            np.log(ds.true_params["eta"]),
+            ds.true_params["delta"],
+            np.log(ds.true_params["eta_prompt"]),
+        ])
+    else:
+        param_names = ["log_phi", "gamma", "log_eta", "delta"]
+        theta_true = np.array([
+            np.log(ds.true_params["phi"]),
+            ds.true_params["gamma"],      
+            np.log(ds.true_params["eta"]),
+            ds.true_params["delta"],      
+        ])
 
     true_values = {
         "phi": ds.true_params["phi"],
         "gamma": ds.true_params["gamma"],
         "eta": ds.true_params["eta"],
         "delta": ds.true_params["delta"],
-        }
+    }
+    if infer_prompt_eta:
+        true_values["eta_prompt"] = ds.true_params["eta_prompt"]
     print(f"True params, (transformed) are {theta_true}")
 
 
     prior_type = config["priors"]["default"]
     
     def log_post(theta):
-        return log_posterior_base(theta, ds.counts, ds.E_centers, ds.E_widths, prior_type)
+        return log_posterior_base(
+            theta,
+            ds.counts,
+            ds.E_centers,
+            ds.E_widths,
+            prior_type,
+            model_options=ds.model_options,
+        )
 
     def grad_log_post(theta):
-        return grad_log_posterior_base(theta, ds.counts, ds.E_centers, ds.E_widths, prior_type)
+        return grad_log_posterior_base(
+            theta,
+            ds.counts,
+            ds.E_centers,
+            ds.E_widths,
+            prior_type,
+            model_options=ds.model_options,
+        )
 
     theta_init = theta_true.copy()
 
