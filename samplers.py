@@ -5,6 +5,7 @@ Here we implement RWMH, MALA. And provide trace plots, Rhat, ESS, Autocorrelatio
 """
 
 import numpy as np
+import pandas as pd
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -655,6 +656,43 @@ def print_diagnostics_multi(results_by_sampler: dict[str, list[MCMCResult]], ci:
                 f"{_fmt(s['ci_upper']):>12}"
             )
 
+def diagnostics_dataframe(results_by_sampler: dict[str, list[MCMCResult]]) -> dict[str, pd.DataFrame]:
+    """
+    Returns three DataFrames (ESS, ESS/s, Rhat), each indexed by sampler name
+    with one column per parameter plus metadata columns (n_chains, accept_rate, wall_time_s).
+    """
+    first_results = next(iter(results_by_sampler.values()))
+    param_names = first_results[0].param_names
+    d = first_results[0].samples.shape[1]
+
+    ess_rows, ess_per_s_rows, rhat_rows = [], [], []
+
+    for sampler_name, results in results_by_sampler.items():
+        stacked = _stack_chains(results)
+        mean_accept = float(np.mean([r.acceptance_rate for r in results]))
+        total_time = float(np.sum([r.wall_time for r in results]))
+
+        ess_vals = [effective_sample_size_multi(stacked[:, :, j]) for j in range(d)]
+        rhat_vals = [split_rhat(stacked[:, :, j]) for j in range(d)]
+
+        base = {"sampler": sampler_name, "n_chains": len(results),
+                "accept_rate": mean_accept, "wall_time_s": total_time}
+
+        ess_rows.append({**base, **{name: ess for name, ess in zip(param_names, ess_vals)}})
+        ess_per_s_rows.append({**base, **{name: ess / total_time for name, ess in zip(param_names, ess_vals)}})
+        rhat_rows.append({**base, **{name: rhat for name, rhat in zip(param_names, rhat_vals)}})
+
+    def _make_df(rows):
+        df = pd.DataFrame(rows).set_index("sampler")
+        return df
+
+    return {
+        "ess": _make_df(ess_rows),
+        "ess_per_s": _make_df(ess_per_s_rows),
+        "rhat": _make_df(rhat_rows),
+    }
+
+
 # saves traceplots for each sampler, showing traces for each chain for each parameter
 def save_traceplots_multi(results: list[MCMCResult], filename: str) -> None:
     stacked = _stack_chains(results)
@@ -854,4 +892,20 @@ if __name__ == "__main__":
     print("\nSaved traceplots to:")
     print(f"  {test_cfg['traceplot_rwmh']}")
     print(f"  {test_cfg['traceplot_mala']}")
+
+    # save posterior summaries as DataFrames
+    for sampler_name, results in [("RWMH", rwmh_results), ("MALA", mala_results)]:
+        summary = posterior_summary_multi(results, true_values=true_values)
+        df = pd.DataFrame(summary).T
+        path = test_cfg.get(f"posterior_summary_base_{truth_model}_{prior_type}_{sampler_name.lower()}", f"Stats/posterior_summary_base_cutoff_{prior_type}_{sampler_name.lower()}.csv")
+        df.to_csv(path)
+        print(f"Saved {sampler_name} posterior summary to {path}")
+
+    # save diagnostics tables as DataFrames
+    truth_model = test_cfg["truth_model"]
+    diag = diagnostics_dataframe({"RWMH": rwmh_results, "MALA": mala_results})
+    for table_name, df in diag.items():
+        path = f"Stats/diagnostics_{table_name}_{truth_model}_{prior_type}.csv"
+        df.to_csv(path)
+        print(f"Saved {table_name} diagnostics to {path}")
     
