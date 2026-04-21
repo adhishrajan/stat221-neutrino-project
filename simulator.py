@@ -2,14 +2,16 @@
 Here we generate synthetic bin counts under multiple truth models
 """
 
+from __future__ import annotations
+
 import numpy as np
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 
 
-def make_energy_bins(n_bins = 20, E_min = 1e4, E_max = 1e7) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def make_energy_bins(n_bins = 20, E_min = 1e4, E_max = 1e7) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     E_edges = np.logspace(np.log10(E_min), np.log10(E_max), n_bins + 1)
     E_centers = np.sqrt(E_edges[:-1] * E_edges[1:])   # geometric mean
     E_widths = E_edges[1:] - E_edges[:-1]
@@ -47,6 +49,31 @@ def signal_cutoff(E, phi, gamma, E_cut, E_widths) -> np.ndarray:
     Power law with exponential cutoff, phi * (E/E_ref)^{-gamma} * exp(-E / E_cut) * dE_i
     """
     return phi * (E / E_REF)**(-gamma) * np.exp(-E / E_cut) * E_widths
+
+
+def signal_counts_for_model(
+    E,
+    E_widths,
+    model: str,
+    params: dict,
+) -> np.ndarray:
+    """
+    Unified signal expected-count helper for SPL/BPL/Cutoff models.
+    """
+    if model == "power_law":
+        return signal_power_law(E, params["phi"], params["gamma"], E_widths)
+    if model == "broken_power_law":
+        return signal_broken_power_law(
+            E,
+            params["phi"],
+            params["gamma1"],
+            params["gamma2"],
+            params["E_break"],
+            E_widths,
+        )
+    if model == "cutoff":
+        return signal_cutoff(E, params["phi"], params["gamma"], params["E_cut"], E_widths)
+    raise ValueError(f"Unknown signal model: {model}")
 
 
 # BACKGROUND MODEL
@@ -143,7 +170,7 @@ def load_hese75_derived_response(
     aeff_allsky_path: str,
     migration_path: str,
     sky_factor_sr: float = 4.0 * np.pi,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load precomputed HESE 7.5-year derived response:
       - sky-averaged Aeff(E_true) table [m^2]
@@ -334,16 +361,15 @@ def generate_single_season(
 
     E_edges, E_centers, E_widths = make_energy_bins(n_bins, E_min, E_max)
 
-    if truth_model == "power_law":
-        mu_signal = signal_power_law(E_centers, phi, gamma, E_widths)
-    elif truth_model == "broken_power_law":
-        mu_signal = signal_broken_power_law(
-            E_centers, phi, gamma, gamma2, E_break, E_widths
-        )
-    elif truth_model == "cutoff":
-        mu_signal = signal_cutoff(E_centers, phi, gamma, E_cut, E_widths)
-    else:
-        raise ValueError(f"Unknown truth model: {truth_model}")
+    signal_params = {
+        "phi": phi,
+        "gamma": gamma,
+        "gamma1": gamma,
+        "gamma2": gamma2,
+        "E_break": E_break,
+        "E_cut": E_cut,
+    }
+    mu_signal = signal_counts_for_model(E_centers, E_widths, truth_model, signal_params)
 
     # background at true-energy level
     mu_background_true = background_atmospheric(

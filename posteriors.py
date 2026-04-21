@@ -1,6 +1,7 @@
 """
 Log posterior and gradient functions.
 We give log posterior evaluation and analytic gradients for the base model with params (phi, gamma, eta, delta)
+also can handle different fit models (power law, broken power law, cutoff)
 and the hierarchical model with params (phi_k, mu_phi, sigma_phi, others)
 We transform the param space for unconstrained MCMC,
 
@@ -15,9 +16,13 @@ mu_phi=mu_phi,
 log_sigma_phi = log(sigma_phi)
 """
 
+from __future__ import annotations
+
 import numpy as np
 from simulator import (
     signal_power_law,
+    signal_counts_for_model,
+    background_atmospheric,
     atmospheric_shape,
     atmospheric_shape_ddelta,
     E_REF,
@@ -129,6 +134,182 @@ def expected_counts_base(E, E_widths, phi, gamma, eta, delta, eta_prompt=None, m
     # here we compute expected counts mu_i = signal + background for each bin
     comp = _component_terms(E, E_widths, phi, gamma, eta, delta, eta_prompt=eta_prompt, model_options=model_options)
     return comp["mu_sig"] + comp["mu_bg"]
+
+
+def get_spectral_param_layout(recover_model: str, infer_prompt_eta: bool) -> list[str]:
+    if recover_model == "power_law":
+        base = ["log_phi", "gamma"]
+    elif recover_model == "broken_power_law":
+        # continuous BPL with single normalization at pivot
+        base = ["log_phi", "gamma1", "gamma2", "log_E_break"]
+    elif recover_model == "cutoff":
+        base = ["log_phi", "gamma", "log_E_cut"]
+    else:
+        raise ValueError(f"Unknown recover_model: {recover_model}")
+
+    shared = ["log_eta", "delta"]
+    if infer_prompt_eta:
+        shared.append("log_eta_prompt")
+    return base + shared
+
+
+def unpack_spectral_params(theta_transformed, recover_model: str, model_options=None) -> dict:
+    infer_prompt_eta = _uses_free_prompt(model_options)
+    names = get_spectral_param_layout(recover_model, infer_prompt_eta)
+    if len(theta_transformed) != len(names):
+        raise ValueError(
+            f"Expected {len(names)} params for {recover_model} with infer_prompt_eta={infer_prompt_eta}, "
+            f"got {len(theta_transformed)}"
+        )
+    out = {k: float(v) for k, v in zip(names, theta_transformed)}
+    for k in list(out.keys()):
+        if k.startswith("log_"):
+            out[k.replace("log_", "")] = float(np.exp(out[k]))
+    return out
+
+
+def expected_counts_spectral(E, E_widths, recover_model: str, p: dict, model_options=None) -> np.ndarray:
+    mu_sig_true = signal_counts_for_model(E, E_widths, recover_model, p)
+
+    atmo_model = "power_law" if model_options is None else model_options.get("atmo_model", "power_law")
+    prompt_fraction = 0.0 if model_options is None else model_options.get("prompt_fraction", 0.0)
+    delta_prompt = 2.7 if model_options is None else model_options.get("delta_prompt", 2.7)
+    E_knee = 3e5 if model_options is None else model_options.get("E_knee", 3e5)
+    knee_sharpness = 4.0 if model_options is None else model_options.get("knee_sharpness", 4.0)
+
+    mu_bg_true = background_atmospheric(
+        E=E,
+        eta=p["eta"],
+        delta=p["delta"],
+        E_widths=E_widths,
+        model=atmo_model,
+        prompt_fraction=prompt_fraction,
+        eta_prompt=p.get("eta_prompt", None),
+        delta_prompt=delta_prompt,
+        E_knee=E_knee,
+        knee_sharpness=knee_sharpness,
+    )
+
+    mu_sig = _apply_response(mu_sig_true, model_options)
+    mu_bg = _apply_response(mu_bg_true, model_options)
+    return mu_sig + mu_bg
+
+
+def log_prior_spectral(p: dict, recover_model: str, prior_type="weakly", model_options=None) -> float:
+    phi = p["phi"]
+    eta = p["eta"]
+    delta = p["delta"]
+    eta_prompt = p.get("eta_prompt", None)
+
+    if phi <= 0 or eta <= 0:
+        return -np.inf
+    if eta_prompt is not None and eta_prompt <= 0:
+        return -np.inf
+    if recover_model == "broken_power_law" and p["E_break"] <= 0:
+        return -np.inf
+    if recover_model == "cutoff" and p["E_cut"] <= 0:
+        return -np.inf
+
+    lp = 0.0
+
+    delta_mean = 3.7 if model_options is None else model_options.get("prior_delta_mean", 3.7)
+    delta_sd = 0.15 if model_options is None else model_options.get("prior_delta_sd", 0.15)
+    lp += -0.5 * ((delta - delta_mean) / delta_sd)**2
+
+    phi_log_mean = np.log(1e-5) if model_options is None else model_options.get("prior_phi_log_mean", np.log(1e-5))
+    phi_log_sd = 2.0 if model_options is None else model_options.get("prior_phi_log_sd", 2.0)
+    gamma_mean = 2.5 if model_options is None else model_options.get("prior_gamma_mean", 2.5)
+    gamma_sd = 0.4 if model_options is None else model_options.get("prior_gamma_sd", 0.4)
+    eta_log_mean = np.log(1e-5) if model_options is None else model_options.get("prior_eta_log_mean", np.log(1e-5))
+    eta_log_sd = 1.0 if model_options is None else model_options.get("prior_eta_log_sd", 1.0)
+
+    if prior_type == "flat":
+        pass
+    elif prior_type == "weakly":
+        lp += -0.5 * ((np.log(phi) - phi_log_mean) / phi_log_sd)**2 - np.log(phi)
+        lp += -0.5 * ((np.log(eta) - eta_log_mean) / eta_log_sd)**2 - np.log(eta)
+
+        if recover_model in {"power_law", "cutoff"}:
+            lp += -0.5 * ((p["gamma"] - gamma_mean) / gamma_sd)**2
+        else:
+            lp += -0.5 * ((p["gamma1"] - gamma_mean) / gamma_sd)**2
+            lp += -0.5 * ((p["gamma2"] - gamma_mean) / gamma_sd)**2
+
+        if recover_model == "broken_power_law":
+            e0 = 3e4 if model_options is None else model_options.get("E_break_ref", 3e4)
+            lp += -0.5 * ((np.log(p["E_break"]) - np.log(e0)) / 1.0)**2 - np.log(p["E_break"])
+        if recover_model == "cutoff":
+            e0 = 1e6 if model_options is None else model_options.get("E_cut_ref", 1e6)
+            lp += -0.5 * ((np.log(p["E_cut"]) - np.log(e0)) / 1.0)**2 - np.log(p["E_cut"])
+
+        if eta_prompt is not None:
+            log_mean = np.log(1e-6) if model_options is None else model_options.get("prompt_prior_log_mean", np.log(1e-6))
+            log_sd = 1.0 if model_options is None else model_options.get("prompt_prior_log_sd", 1.0)
+            lp += -0.5 * ((np.log(eta_prompt) - log_mean) / log_sd)**2 - np.log(eta_prompt)
+    elif prior_type == "lognormal_gamma":
+        if recover_model in {"power_law", "cutoff"}:
+            gamma_val = p["gamma"]
+            if gamma_val <= 0:
+                return -np.inf
+            lp += -0.5 * ((np.log(gamma_val) - np.log(2.5)) / 0.2)**2 - np.log(gamma_val)
+        else:
+            for gk in ("gamma1", "gamma2"):
+                gv = p[gk]
+                if gv <= 0:
+                    return -np.inf
+                lp += -0.5 * ((np.log(gv) - np.log(2.5)) / 0.2)**2 - np.log(gv)
+    else:
+        raise ValueError(f"Unknown prior type: {prior_type}")
+
+    return float(lp)
+
+
+def log_posterior_spectral(theta_transformed, counts, E, E_widths, recover_model: str, prior_type="weakly", model_options=None) -> float:
+    p = unpack_spectral_params(theta_transformed, recover_model=recover_model, model_options=model_options)
+    lp = log_prior_spectral(p, recover_model=recover_model, prior_type=prior_type, model_options=model_options)
+    if not np.isfinite(lp):
+        return -np.inf
+
+    # transformed-space Jacobian terms
+    lp += p["log_phi"] + p["log_eta"]
+    if "log_eta_prompt" in p:
+        lp += p["log_eta_prompt"]
+    if recover_model == "broken_power_law":
+        lp += p["log_E_break"]
+    if recover_model == "cutoff":
+        lp += p["log_E_cut"]
+
+    mu = expected_counts_spectral(E, E_widths, recover_model, p, model_options=model_options)
+    if np.any((mu <= 0) & (counts > 0)):
+        return -np.inf
+    lp += poisson_log_likelihood(counts, mu)
+    return float(lp)
+
+
+def grad_log_posterior_spectral_numerical(
+    theta_transformed,
+    counts,
+    E,
+    E_widths,
+    recover_model: str,
+    prior_type="weakly",
+    model_options=None,
+    eps=1e-5,
+) -> np.ndarray:
+    theta = np.asarray(theta_transformed, dtype=float)
+    g = np.zeros_like(theta)
+    for j in range(theta.size):
+        e = np.zeros_like(theta)
+        e[j] = eps
+        f_plus = log_posterior_spectral(
+            theta + e, counts, E, E_widths, recover_model=recover_model, prior_type=prior_type, model_options=model_options
+        )
+        f_minus = log_posterior_spectral(
+            theta - e, counts, E, E_widths, recover_model=recover_model, prior_type=prior_type, model_options=model_options
+        )
+        if np.isfinite(f_plus) and np.isfinite(f_minus):
+            g[j] = (f_plus - f_minus) / (2.0 * eps)
+    return g
 
 
 def poisson_log_likelihood(counts, mu) -> float:

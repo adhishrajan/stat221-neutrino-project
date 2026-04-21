@@ -4,6 +4,8 @@ Pls check correctness
 Here we implement RWMH, MALA. And provide trace plots, Rhat, ESS, Autocorrelation
 """
 
+from __future__ import annotations
+
 import numpy as np
 import time
 from dataclasses import dataclass
@@ -397,6 +399,7 @@ def run_multiple_chains(sampler_fn, theta_init: np.ndarray, n_chains: int = 4, i
         rng = np.random.default_rng()
 
     results = []
+    verbose = bool(sampler_kwargs.pop("verbose", False))
 
     for chain_id in range(n_chains):
         if init_strategy == "same":
@@ -412,7 +415,7 @@ def run_multiple_chains(sampler_fn, theta_init: np.ndarray, n_chains: int = 4, i
         result = sampler_fn(
             theta_init=theta0,
             rng=chain_rng,
-            verbose=True,
+            verbose=verbose,
             **sampler_kwargs,
         )
         results.append(result)
@@ -548,6 +551,12 @@ def posterior_summary_multi(results: list[MCMCResult], ci: float = 0.90, true_va
         elif name == "log_eta_prompt":
             x = np.exp(x)
             display_name = "eta_prompt"
+        elif name == "log_E_break":
+            x = np.exp(x)
+            display_name = "E_break"
+        elif name == "log_E_cut":
+            x = np.exp(x)
+            display_name = "E_cut"
         else:
             display_name = name
     
@@ -678,6 +687,60 @@ def save_traceplots_multi(results: list[MCMCResult], filename: str) -> None:
     fig.savefig(filename, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
+
+def numerical_gradient(logp_fn: Callable[[np.ndarray], float], eps: float = 1e-5) -> Callable[[np.ndarray], np.ndarray]:
+    def _g(theta: np.ndarray) -> np.ndarray:
+        grad = np.zeros_like(theta, dtype=float)
+        for j in range(theta.size):
+            e = np.zeros_like(theta)
+            e[j] = eps
+            fp = logp_fn(theta + e)
+            fm = logp_fn(theta - e)
+            if np.isfinite(fp) and np.isfinite(fm):
+                grad[j] = (fp - fm) / (2.0 * eps)
+            else:
+                grad[j] = 0.0
+        return grad
+    return _g
+
+
+def build_spectral_logpost_and_grad(ds, recover_model: str, prior_type: str, eps: float = 1e-5):
+    infer_prompt_eta = bool(ds.model_options.get("infer_prompt_eta", False))
+    from posteriors import (
+        get_spectral_param_layout as _get_spectral_param_layout,
+        log_posterior_spectral as _log_posterior_spectral,
+    )
+    names = _get_spectral_param_layout(recover_model, infer_prompt_eta)
+
+    def _lp(theta: np.ndarray) -> float:
+        return _log_posterior_spectral(
+            theta,
+            ds.counts,
+            ds.E_centers,
+            ds.E_widths,
+            recover_model=recover_model,
+            prior_type=prior_type,
+            model_options=ds.model_options,
+        )
+
+    return _lp, numerical_gradient(_lp, eps=eps), names
+
+
+def make_theta_init_for_model(ds, recover_model: str, names: list[str], signal_cfg: dict) -> np.ndarray:
+    vals: dict[str, float] = {
+        "log_phi": np.log(ds.true_params["phi"]),
+        "gamma": ds.true_params["gamma"],
+        "gamma1": ds.true_params["gamma"],
+        "gamma2": ds.true_params.get("gamma2", float(signal_cfg["gamma2"])),
+        "log_E_break": np.log(ds.true_params.get("E_break", float(signal_cfg["E_break"]))),
+        "log_E_cut": np.log(ds.true_params.get("E_cut", float(signal_cfg["E_cut"]))),
+        "log_eta": np.log(ds.true_params["eta"]),
+        "delta": ds.true_params["delta"],
+    }
+    if "eta_prompt" in ds.true_params:
+        vals["log_eta_prompt"] = np.log(ds.true_params["eta_prompt"])
+    return np.array([vals[n] for n in names], dtype=float)
+
 # test
 if __name__ == "__main__":
     from simulator import generate_single_season
@@ -738,25 +801,10 @@ if __name__ == "__main__":
           f"Signal: {ds.mu_signal.sum():.0f}, "
           f"Background: {ds.mu_background.sum():.0f}")
 
-    infer_prompt_eta = bool(ds.model_options.get("infer_prompt_eta", False))
-    if infer_prompt_eta:
-        param_names = ["log_phi", "gamma", "log_eta", "delta", "log_eta_prompt"]
-        theta_true = np.array([
-            np.log(ds.true_params["phi"]),
-            ds.true_params["gamma"],
-            np.log(ds.true_params["eta"]),
-            ds.true_params["delta"],
-            np.log(ds.true_params["eta_prompt"]),
-        ])
-    else:
-        param_names = ["log_phi", "gamma", "log_eta", "delta"]
-        theta_true = np.array([
-            np.log(ds.true_params["phi"]),
-            ds.true_params["gamma"],      
-            np.log(ds.true_params["eta"]),
-            ds.true_params["delta"],      
-        ])
+    recover_model = test_cfg.get("recover_model", ds.true_params["truth_model"])
+    prior_type = config["priors"]["default"]
 
+    infer_prompt_eta = bool(ds.model_options.get("infer_prompt_eta", False))
     true_values = {
         "phi": ds.true_params["phi"],
         "gamma": ds.true_params["gamma"],
@@ -765,30 +813,61 @@ if __name__ == "__main__":
     }
     if infer_prompt_eta:
         true_values["eta_prompt"] = ds.true_params["eta_prompt"]
-    print(f"True params, (transformed) are {theta_true}")
+    if "gamma2" in ds.true_params:
+        true_values["gamma2"] = ds.true_params["gamma2"]
+    if "E_break" in ds.true_params:
+        true_values["E_break"] = ds.true_params["E_break"]
+    if "E_cut" in ds.true_params:
+        true_values["E_cut"] = ds.true_params["E_cut"]
 
+    if recover_model == "power_law":
+        if infer_prompt_eta:
+            param_names = ["log_phi", "gamma", "log_eta", "delta", "log_eta_prompt"]
+            theta_true = np.array([
+                np.log(ds.true_params["phi"]),
+                ds.true_params["gamma"],
+                np.log(ds.true_params["eta"]),
+                ds.true_params["delta"],
+                np.log(ds.true_params["eta_prompt"]),
+            ])
+        else:
+            param_names = ["log_phi", "gamma", "log_eta", "delta"]
+            theta_true = np.array([
+                np.log(ds.true_params["phi"]),
+                ds.true_params["gamma"],
+                np.log(ds.true_params["eta"]),
+                ds.true_params["delta"],
+            ])
 
-    prior_type = config["priors"]["default"]
-    
-    def log_post(theta):
-        return log_posterior_base(
-            theta,
-            ds.counts,
-            ds.E_centers,
-            ds.E_widths,
-            prior_type,
-            model_options=ds.model_options,
+        def log_post(theta):
+            return log_posterior_base(
+                theta,
+                ds.counts,
+                ds.E_centers,
+                ds.E_widths,
+                prior_type,
+                model_options=ds.model_options,
+            )
+
+        def grad_log_post(theta):
+            return grad_log_posterior_base(
+                theta,
+                ds.counts,
+                ds.E_centers,
+                ds.E_widths,
+                prior_type,
+                model_options=ds.model_options,
+            )
+    else:
+        lp_fn, grad_fn, param_names = build_spectral_logpost_and_grad(
+            ds, recover_model=recover_model, prior_type=prior_type, eps=1e-5
         )
+        theta_true = make_theta_init_for_model(ds, recover_model, param_names, signal_cfg)
+        log_post = lp_fn
+        grad_log_post = grad_fn
 
-    def grad_log_post(theta):
-        return grad_log_posterior_base(
-            theta,
-            ds.counts,
-            ds.E_centers,
-            ds.E_widths,
-            prior_type,
-            model_options=ds.model_options,
-        )
+    print(f"Recover model: {recover_model}")
+    print(f"True params (transformed init): {theta_true}")
 
     theta_init = theta_true.copy()
 

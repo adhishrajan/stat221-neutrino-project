@@ -12,6 +12,21 @@ signal:
   E_break: 3e4
   E_cut: 1e6
 
+signal_mese_like:
+  # MESE-like reference values at 100 TeV pivot (phi0 units: GeV^-1 cm^-2 s^-1 sr^-1)
+  spl:
+    phi0_100tev: 2.13e-18
+    gamma: 2.55
+  bpl:
+    phi0_100tev: 2.28e-18
+    gamma1: 1.72
+    gamma2: 2.84
+    E_break: 3.31131121482591e4  # 10^4.52 GeV
+  cutoff:
+    phi0_100tev: 3.98e-18
+    gamma: 2.16
+    E_cut: 2.51188643150958e5  # 10^5.40 GeV
+
 background:
   eta: 1.0e-17
   eta_prompt: 2.0e-18
