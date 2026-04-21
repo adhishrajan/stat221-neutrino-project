@@ -64,7 +64,7 @@ rep_mean = counts_rep.mean(axis=0)
 rep_lo = np.percentile(counts_rep, 5,  axis=0)
 rep_hi = np.percentile(counts_rep, 95, axis=0)
 
-print("\n=== POSTERIOR PREDICTIVE CHECK ===")
+print("\nPOSTERIOR PREDICTIVE CHECK")
 print(f"{'Bin':>4} {'Observed':>10} {'Rep mean':>10} {'Rep 5%':>8} {'Rep 95%':>9}")
 for b in range(len(ds.counts)):
     flag = " *" if ds.counts[b] < rep_lo[b] or ds.counts[b] > rep_hi[b] else ""
