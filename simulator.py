@@ -272,6 +272,7 @@ class HierarchicalDataset:
     true_params: dict
     # (K,) season specific true fluxes
     phi_k: np.ndarray
+    eta_k: np.ndarray
 
 
 # Main generation functions
@@ -454,8 +455,9 @@ def generate_hierarchical(
     K = 10,
     mu_phi = np.log(1e-5),
     sigma_phi = 0.3,
+    mu_eta = -39.14394658089878,
+    sigma_eta = 1,
     gamma = 2.5,
-    eta = 1e-5,
     delta = 3.7,
     truth_model = "power_law",
     n_bins = 20,
@@ -484,13 +486,15 @@ def generate_hierarchical(
     # draw season specific fluxes
     log_phi_k = rng.normal(mu_phi, sigma_phi, size=K)
     phi_k = np.exp(log_phi_k)
-
+    log_eta_k = rng.normal(mu_eta, sigma_eta, size=K)
+    eta_k = np.exp(log_eta_k)
+    
     seasons = []
     for k in range(K):
         ds = generate_single_season(
             phi=phi_k[k],
             gamma=gamma,
-            eta=eta,
+            eta=eta_k[k],
             delta=delta,
             truth_model=truth_model,
             n_bins=n_bins,
@@ -504,8 +508,9 @@ def generate_hierarchical(
     true_params = {
         "mu_phi": mu_phi,
         "sigma_phi": sigma_phi,
+        "mu_eta": mu_eta,
+        "sigma_eta": sigma_eta,
         "gamma": gamma,
-        "eta": eta,
         "delta": delta,
         "truth_model": truth_model,
         "K": K,
@@ -515,6 +520,7 @@ def generate_hierarchical(
         seasons=seasons,
         true_params=true_params,
         phi_k=phi_k,
+        eta_k=eta_k
     )
 
 
@@ -601,8 +607,9 @@ if __name__ == "__main__":
         K=int(hier_cfg["K"]),
         mu_phi=float(hier_cfg["mu_phi"]),
         sigma_phi=float(hier_cfg["sigma_phi"]),
+        mu_eta=float(hier_cfg["mu_eta"]),
+        sigma_eta=float(hier_cfg["sigma_eta"]),
         gamma=float(hier_cfg["gamma"]),
-        eta=float(hier_cfg["eta"]),
         delta=float(hier_cfg["delta"]),
         truth_model=hier_cfg["truth_model"],
         n_bins=int(bins_cfg["n_bins"]),
@@ -633,10 +640,9 @@ if __name__ == "__main__":
         hese75_sky_factor_sr=float(det_cfg.get("hese75_sky_factor_sr", 4.0 * np.pi)),
         rng=rng,
     )
-    print(f"\nShared params: gamma={hds.true_params['gamma']}, "
-          f"eta={hds.true_params['eta']:.2e}, delta={hds.true_params['delta']}")
-    print(f"Population: mu_phi={hds.true_params['mu_phi']:.2f}, "
-          f"sigma_phi={hds.true_params['sigma_phi']:.2f}")
+    print(f"\nShared params: gamma={hds.true_params['gamma']}, delta={hds.true_params['delta']}")
+    print(f"Phi population: mu_phi={hds.true_params['mu_phi']:.2f}, sigma_phi={hds.true_params['sigma_phi']:.2f}")
+    print(f"Eta population: mu_eta={hds.true_params['mu_eta']:.2f}, sigma_eta={hds.true_params['sigma_eta']:.2f}")
     print(f"Season fluxes phi_k: {hds.phi_k}")
     print(f"\nPer season total counts:")
     for k, season in enumerate(hds.seasons):

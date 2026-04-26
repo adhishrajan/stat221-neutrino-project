@@ -18,7 +18,7 @@ background:
   delta: 3.7
 
 atmospheric_realism:
-  model: conv_plus_prompt
+  model: power_law
   prompt_fraction: 0.15
   delta_prompt: 2.7
   E_knee: 3e5
@@ -104,8 +104,9 @@ hierarchical:
   K: 10
   mu_phi: -40.72283611184711
   sigma_phi: 0.3
+  mu_eta: -39.14394658089878
+  sigma_eta: 1.0
   gamma: 2.5
-  eta: 1.0e-17
   delta: 3.7
   truth_model: power_law
 
@@ -124,7 +125,7 @@ testing:
   init_scale_base: 0.05
   init_scale_hierarchical: 0.001
   preconditioner_ridge: 1e-6
-  hierarchical_parameterization: centered
+  hierarchical_parameterization: noncentered
   latent_display_diagnostics: raw
   latent_display_traceplots: log_phi
   traceplot_rwmh: traceplots_rwmh.png

@@ -530,52 +530,68 @@ def transform_hierarchical_samples(stacked: np.ndarray, parameterization: str, K
     """
     parameterization: "centered" or "noncentered"
     K: number of seasons
-    latent_display: how to display phi parameters
-        - "raw": show raw sampled coords
-            centered -> log_phi_k
-            noncentered -> z_k
-        - "log_phi": always show log_phi_k
-        - "phi": always show phi_k
+    latent_display: how to display per-season latent parameters
+        - "raw": raw sampled coords (log_phi_k/log_eta_k for centered; z_phi_k/z_eta_k for noncentered)
+        - "log_phi": always reconstruct and show log_phi_k and log_eta_k
+        - "phi": always reconstruct and show phi_k and eta_k
     """
     n_chains, n_samples, d = stacked.shape
-    if d not in (K + 5, K + 6):
+    has_prompt = d == 2 * K + 7
+    if d not in (2 * K + 6, 2 * K + 7):
         raise ValueError(f"Unexpected hierarchical dimension d={d} for K={K}")
-    has_prompt = d == K + 6
+    p_offset = 1 if has_prompt else 0
     out = stacked.copy()
 
     if parameterization == "centered":
-        # theta = [log_phi_1,...,log_phi_K,gamma,log_eta,delta,mu_phi,log_sigma_phi]
+        # theta = [log_phi_1,...,log_phi_K, log_eta_1,...,log_eta_K, gamma, delta, (log_eta_prompt), mu_phi, log_sigma_phi, mu_eta, log_sigma_eta]
         log_phi = stacked[:, :, :K]
+        log_eta = stacked[:, :, K:2 * K]
 
-        if latent_display == "raw" or latent_display == "log_phi":
+        if latent_display in ("raw", "log_phi"):
             out[:, :, :K] = log_phi
-            latent_names = [f"log_phi_{k+1}" for k in range(K)]
+            out[:, :, K:2 * K] = log_eta
+            phi_names = [f"log_phi_{k+1}" for k in range(K)]
+            eta_names = [f"log_eta_{k+1}" for k in range(K)]
         elif latent_display == "phi":
             out[:, :, :K] = np.exp(log_phi)
-            latent_names = [f"phi_{k+1}" for k in range(K)]
+            out[:, :, K:2 * K] = np.exp(log_eta)
+            phi_names = [f"phi_{k+1}" for k in range(K)]
+            eta_names = [f"eta_{k+1}" for k in range(K)]
         else:
             raise ValueError(f"Unknown latent_display: {latent_display}")
 
     elif parameterization == "noncentered":
-        # theta = [z_1,...,z_K,gamma,log_eta,delta,mu_phi,log_sigma_phi]
-        z = stacked[:, :, :K]
-        mu_idx = K + 4 if has_prompt else K + 3
-        lsig_idx = K + 5 if has_prompt else K + 4
-        mu_phi = stacked[:, :, mu_idx]
-        log_sigma_phi = stacked[:, :, lsig_idx]
-        sigma_phi = np.exp(log_sigma_phi)
+        # theta = [z_phi_1,...,z_phi_K, z_eta_1,...,z_eta_K, gamma, delta, (log_eta_prompt), mu_phi, log_sigma_phi, mu_eta, log_sigma_eta]
+        z_phi = stacked[:, :, :K]
+        z_eta = stacked[:, :, K:2 * K]
+        mu_phi_idx = 2 * K + 2 + p_offset
+        lsig_phi_idx = 2 * K + 3 + p_offset
+        mu_eta_idx = 2 * K + 4 + p_offset
+        lsig_eta_idx = 2 * K + 5 + p_offset
+        mu_phi = stacked[:, :, mu_phi_idx]
+        sigma_phi = np.exp(stacked[:, :, lsig_phi_idx])
+        mu_eta = stacked[:, :, mu_eta_idx]
+        sigma_eta = np.exp(stacked[:, :, lsig_eta_idx])
 
         if latent_display == "raw":
-            out[:, :, :K] = z
-            latent_names = [f"z_{k+1}" for k in range(K)]
+            out[:, :, :K] = z_phi
+            out[:, :, K:2 * K] = z_eta
+            phi_names = [f"z_phi_{k+1}" for k in range(K)]
+            eta_names = [f"z_eta_{k+1}" for k in range(K)]
         elif latent_display == "log_phi":
-            log_phi = mu_phi[:, :, None] + sigma_phi[:, :, None] * z
+            log_phi = mu_phi[:, :, None] + sigma_phi[:, :, None] * z_phi
+            log_eta = mu_eta[:, :, None] + sigma_eta[:, :, None] * z_eta
             out[:, :, :K] = log_phi
-            latent_names = [f"log_phi_{k+1}" for k in range(K)]
+            out[:, :, K:2 * K] = log_eta
+            phi_names = [f"log_phi_{k+1}" for k in range(K)]
+            eta_names = [f"log_eta_{k+1}" for k in range(K)]
         elif latent_display == "phi":
-            log_phi = mu_phi[:, :, None] + sigma_phi[:, :, None] * z
+            log_phi = mu_phi[:, :, None] + sigma_phi[:, :, None] * z_phi
+            log_eta = mu_eta[:, :, None] + sigma_eta[:, :, None] * z_eta
             out[:, :, :K] = np.exp(log_phi)
-            latent_names = [f"phi_{k+1}" for k in range(K)]
+            out[:, :, K:2 * K] = np.exp(log_eta)
+            phi_names = [f"phi_{k+1}" for k in range(K)]
+            eta_names = [f"eta_{k+1}" for k in range(K)]
         else:
             raise ValueError(f"Unknown latent_display: {latent_display}")
 
@@ -583,11 +599,11 @@ def transform_hierarchical_samples(stacked: np.ndarray, parameterization: str, K
         raise ValueError(f"Unknown parameterization: {parameterization}")
 
     # shared parameters
-    shared_names = ["gamma", "log_eta", "delta"]
+    shared_names = ["gamma", "delta"]
     if has_prompt:
         shared_names.append("log_eta_prompt")
-    shared_names.extend(["mu_phi", "log_sigma_phi"])
-    names = latent_names + shared_names
+    shared_names.extend(["mu_phi", "log_sigma_phi", "mu_eta", "log_sigma_eta"])
+    names = phi_names + eta_names + shared_names
 
     return out, names
 
@@ -778,13 +794,14 @@ if __name__ == "__main__":
         K=int(hier_cfg["K"]),
         mu_phi=float(hier_cfg["mu_phi"]),
         sigma_phi=float(hier_cfg["sigma_phi"]),
+        mu_eta=float(hier_cfg["mu_eta"]),
+        sigma_eta=float(hier_cfg["sigma_eta"]),
         gamma=float(hier_cfg["gamma"]),
-        eta=float(hier_cfg["eta"]),
         delta=float(hier_cfg["delta"]),
         truth_model=hier_cfg["truth_model"],
         atmo_model=atmo_cfg["model"],
         prompt_fraction=float(atmo_cfg["prompt_fraction"]),
-        eta_prompt=float(config["background"].get("eta_prompt", float(hier_cfg["eta"]) * float(atmo_cfg["prompt_fraction"]))),
+        eta_prompt=float(config["background"].get("eta_prompt", float(config["background"]["eta"]) * float(atmo_cfg["prompt_fraction"]))),
         delta_prompt=float(atmo_cfg["delta_prompt"]),
         E_knee=float(atmo_cfg["E_knee"]),
         knee_sharpness=float(atmo_cfg["knee_sharpness"]),
@@ -808,50 +825,63 @@ if __name__ == "__main__":
         rng=rng,
     )
     K = len(ds.seasons)
-    print(f"K = {K}, True means = {ds.phi_k}")
+    print(f"K = {K}, True phi_k = {ds.phi_k}, True eta_k = {ds.eta_k}")
+
+    mu_phi_true = ds.true_params["mu_phi"]
+    sigma_phi_true = ds.true_params["sigma_phi"]
+    mu_eta_true = ds.true_params["mu_eta"]
+    sigma_eta_true = ds.true_params["sigma_eta"]
 
     if parameterization == "centered":
         print("CENTERED PARAMETERIZATION")
         param_names = [f"log_phi_{i+1}" for i in range(K)]
-        theta_true = np.log(ds.phi_k).tolist()
+        param_names += [f"log_eta_{i+1}" for i in range(K)]
+        theta_true = np.log(ds.phi_k).tolist() + np.log(ds.eta_k).tolist()
         latent_truth = {f"log_phi_{k+1}": np.log(ds.phi_k[k]) for k in range(K)}
+        latent_truth.update({f"log_eta_{k+1}": np.log(ds.eta_k[k]) for k in range(K)})
     elif parameterization == "noncentered":
         print("NONCENTERED PARAMETERIZATION")
-        param_names = [f"z_{i+1}" for i in range(K)]
-        z_true = (np.log(ds.phi_k) - ds.true_params["mu_phi"]) / ds.true_params["sigma_phi"]
-        theta_true = z_true.tolist()
-        latent_truth = {f"z_{k+1}": z_true[k] for k in range(K)}
+        param_names = [f"z_phi_{i+1}" for i in range(K)]
+        param_names += [f"z_eta_{i+1}" for i in range(K)]
+        z_phi_true = (np.log(ds.phi_k) - mu_phi_true) / sigma_phi_true
+        z_eta_true = (np.log(ds.eta_k) - mu_eta_true) / sigma_eta_true
+        theta_true = z_phi_true.tolist() + z_eta_true.tolist()
+        latent_truth = {f"z_phi_{k+1}": z_phi_true[k] for k in range(K)}
+        latent_truth.update({f"z_eta_{k+1}": z_eta_true[k] for k in range(K)})
     else:
         raise ValueError(f"Unknown parameterization: {parameterization}")
 
     infer_prompt_eta = bool(ds.seasons[0].model_options.get("infer_prompt_eta", False))
-    param_names.extend(["gamma", "log_eta", "delta"])
+    param_names.extend(["gamma", "delta"])
     if infer_prompt_eta:
         param_names.append("log_eta_prompt")
-    param_names.extend(["mu_phi", "log_sigma_phi"])
+    param_names.extend(["mu_phi", "log_sigma_phi", "mu_eta", "log_sigma_eta"])
     theta_true.extend([
         ds.true_params["gamma"],
-        np.log(ds.true_params["eta"]),
         ds.true_params["delta"],
     ])
     if infer_prompt_eta:
         theta_true.append(np.log(ds.seasons[0].true_params["eta_prompt"]))
     theta_true.extend([
-        ds.true_params["mu_phi"],
-        np.log(ds.true_params["sigma_phi"]),
+        mu_phi_true,
+        np.log(sigma_phi_true),
+        mu_eta_true,
+        np.log(sigma_eta_true),
     ])
     theta_true = np.array(theta_true)
-    print(f"True params, (transformed) are {theta_true}")
+    print(f"True params (transformed): {theta_true}")
 
     true_values = {
         **latent_truth,
         **{f"log_phi_{k+1}": np.log(ds.phi_k[k]) for k in range(K)},
+        **{f"log_eta_{k+1}": np.log(ds.eta_k[k]) for k in range(K)},
         "gamma": ds.true_params["gamma"],
-        "log_eta": np.log(ds.true_params["eta"]),
         "delta": ds.true_params["delta"],
         **({"log_eta_prompt": np.log(ds.seasons[0].true_params["eta_prompt"])} if infer_prompt_eta else {}),
-        "mu_phi": ds.true_params["mu_phi"],
-        "log_sigma_phi": np.log(ds.true_params["sigma_phi"]),
+        "mu_phi": mu_phi_true,
+        "log_sigma_phi": np.log(sigma_phi_true),
+        "mu_eta": mu_eta_true,
+        "log_sigma_eta": np.log(sigma_eta_true),
     }
 
     prior_type = config["priors"]["default"]

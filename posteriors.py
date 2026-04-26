@@ -414,90 +414,94 @@ def unpack_hierarchical_centered(theta, K) -> dict:
     """
     unpack transformed parameters for the centered hierarchical model.
     theta layout:
-      no prompt: [log_phi_1, ..., log_phi_K, gamma, log_eta, delta, mu_phi, log_sigma_phi]
-      with prompt: [log_phi_1, ..., log_phi_K, gamma, log_eta, delta, log_eta_prompt, mu_phi, log_sigma_phi]
+      no prompt: [log_phi_1,...,log_phi_K, log_eta_1,...,log_eta_K, gamma, delta, mu_phi, log_sigma_phi, mu_eta, log_sigma_eta]
+      with prompt: [log_phi_1,...,log_phi_K, log_eta_1,...,log_eta_K, gamma, delta, log_eta_prompt, mu_phi, log_sigma_phi, mu_eta, log_sigma_eta]
     """
-    use_prompt = len(theta) == K + 6
-    if len(theta) not in (K + 5, K + 6):
+    use_prompt = len(theta) == 2 * K + 7
+    if len(theta) not in (2 * K + 6, 2 * K + 7):
         raise ValueError(f"Unexpected hierarchical theta length {len(theta)} for K={K}")
 
     log_phi_k = theta[:K]
-    gamma_val = theta[K]
-    log_eta = theta[K + 1]
-    delta_val = theta[K + 2]
-    if use_prompt:
-        log_eta_prompt = theta[K + 3]
-        mu_phi = theta[K + 4]
-        log_sigma_phi = theta[K + 5]
-    else:
-        log_eta_prompt = None
-        mu_phi = theta[K + 3]
-        log_sigma_phi = theta[K + 4]
+    log_eta_k = theta[K:2 * K]
+    gamma_val = theta[2 * K]
+    delta_val = theta[2 * K + 1]
+    p = 1 if use_prompt else 0
+    log_eta_prompt = theta[2 * K + 2] if use_prompt else None
+    mu_phi = theta[2 * K + 2 + p]
+    log_sigma_phi = theta[2 * K + 3 + p]
+    mu_eta = theta[2 * K + 4 + p]
+    log_sigma_eta = theta[2 * K + 5 + p]
 
     return {
         "phi_k": np.exp(log_phi_k),
         "log_phi_k": log_phi_k,
+        "eta_k": np.exp(log_eta_k),
+        "log_eta_k": log_eta_k,
         "gamma": gamma_val,
-        "eta": np.exp(log_eta),
-        "log_eta": log_eta,
         "delta": delta_val,
         "eta_prompt": None if log_eta_prompt is None else np.exp(log_eta_prompt),
         "log_eta_prompt": log_eta_prompt,
         "mu_phi": mu_phi,
         "sigma_phi": np.exp(log_sigma_phi),
         "log_sigma_phi": log_sigma_phi,
+        "mu_eta": mu_eta,
+        "sigma_eta": np.exp(log_sigma_eta),
+        "log_sigma_eta": log_sigma_eta,
     }
 
 
 def unpack_hierarchical_noncentered(theta, K) -> dict:
     """
-    unpack transformed parameters for the non centered hierarchical model
+    unpack transformed parameters for the non centered hierarchical model.
     theta layout:
-      no prompt: [z_1, ..., z_K, gamma, log_eta, delta, mu_phi, log_sigma_phi]
-      with prompt: [z_1, ..., z_K, gamma, log_eta, delta, log_eta_prompt, mu_phi, log_sigma_phi]
-    where log(phi_k) = mu_phi + sigma_phi * z_k
+      no prompt: [z_phi_1,...,z_phi_K, z_eta_1,...,z_eta_K, gamma, delta, mu_phi, log_sigma_phi, mu_eta, log_sigma_eta]
+      with prompt: [z_phi_1,...,z_phi_K, z_eta_1,...,z_eta_K, gamma, delta, log_eta_prompt, mu_phi, log_sigma_phi, mu_eta, log_sigma_eta]
+    where log(phi_k) = mu_phi + sigma_phi * z_phi_k, log(eta_k) = mu_eta + sigma_eta * z_eta_k
     """
-    use_prompt = len(theta) == K + 6
-    if len(theta) not in (K + 5, K + 6):
+    use_prompt = len(theta) == 2 * K + 7
+    if len(theta) not in (2 * K + 6, 2 * K + 7):
         raise ValueError(f"Unexpected hierarchical theta length {len(theta)} for K={K}")
 
-    z_k = theta[:K]
-    gamma_val = theta[K]
-    log_eta = theta[K + 1]
-    delta_val = theta[K + 2]
-    if use_prompt:
-        log_eta_prompt = theta[K + 3]
-        mu_phi = theta[K + 4]
-        log_sigma_phi = theta[K + 5]
-    else:
-        log_eta_prompt = None
-        mu_phi = theta[K + 3]
-        log_sigma_phi = theta[K + 4]
+    z_phi_k = theta[:K]
+    z_eta_k = theta[K:2 * K]
+    gamma_val = theta[2 * K]
+    delta_val = theta[2 * K + 1]
+    p = 1 if use_prompt else 0
+    log_eta_prompt = theta[2 * K + 2] if use_prompt else None
+    mu_phi = theta[2 * K + 2 + p]
+    log_sigma_phi = theta[2 * K + 3 + p]
+    mu_eta = theta[2 * K + 4 + p]
+    log_sigma_eta = theta[2 * K + 5 + p]
     sigma_phi = np.exp(log_sigma_phi)
+    sigma_eta = np.exp(log_sigma_eta)
 
-    log_phi_k = mu_phi + sigma_phi * z_k
+    log_phi_k = mu_phi + sigma_phi * z_phi_k
+    log_eta_k = mu_eta + sigma_eta * z_eta_k
 
     return {
         "phi_k": np.exp(log_phi_k),
         "log_phi_k": log_phi_k,
-        "z_k": z_k,
+        "z_phi_k": z_phi_k,
+        "eta_k": np.exp(log_eta_k),
+        "log_eta_k": log_eta_k,
+        "z_eta_k": z_eta_k,
         "gamma": gamma_val,
-        "eta": np.exp(log_eta),
-        "log_eta": log_eta,
         "delta": delta_val,
         "eta_prompt": None if log_eta_prompt is None else np.exp(log_eta_prompt),
         "log_eta_prompt": log_eta_prompt,
         "mu_phi": mu_phi,
         "sigma_phi": sigma_phi,
         "log_sigma_phi": log_sigma_phi,
+        "mu_eta": mu_eta,
+        "sigma_eta": sigma_eta,
+        "log_sigma_eta": log_sigma_eta,
     }
 
 
 def log_posterior_hierarchical(theta, seasons, parameterization = "centered", prior_type = "weakly") -> float:
     """
-    Log posterior for the hierarchical multi season model
-    params are:
-    theta = parameter vector (len K + 5 or K + 6 with prompt nuisance)
+    Log posterior for the hierarchical multi season model.
+    theta = parameter vector (len 2K+6 or 2K+7 with prompt nuisance)
     seasons = list of K Dataset objects
     parameterization = 'centered'/'noncentered'
     prior_type: can be one of flat, weakly, lognormal_gamma
@@ -505,7 +509,7 @@ def log_posterior_hierarchical(theta, seasons, parameterization = "centered", pr
     K = len(seasons)
     mo0 = seasons[0].model_options if K > 0 else {}
     allow_prompt = _uses_free_prompt(mo0)
-    expected_dim = K + 6 if allow_prompt else K + 5
+    expected_dim = 2 * K + 7 if allow_prompt else 2 * K + 6
     if len(theta) != expected_dim:
         return -np.inf
 
@@ -517,23 +521,26 @@ def log_posterior_hierarchical(theta, seasons, parameterization = "centered", pr
         raise ValueError(f"Unknown parameterization: {parameterization}")
 
     phi_k = p["phi_k"]
+    log_phi_k = p["log_phi_k"]
     gamma_val = p["gamma"]
-    eta = p["eta"]
+    eta_k = p["eta_k"]
+    log_eta_k = p["log_eta_k"]
     delta_val = p["delta"]
     eta_prompt = p["eta_prompt"] if allow_prompt else None
     log_eta_prompt = p["log_eta_prompt"] if allow_prompt else None
     mu_phi = p["mu_phi"]
     sigma_phi = p["sigma_phi"]
+    mu_eta = p["mu_eta"]
+    sigma_eta = p["sigma_eta"]
 
-
-    if eta <= 0 or sigma_phi <= 0 or np.any(phi_k <= 0):
+    if sigma_phi <= 0 or sigma_eta <= 0 or np.any(phi_k <= 0) or np.any(eta_k <= 0):
         return -np.inf
     if eta_prompt is not None and eta_prompt <= 0:
         return -np.inf
 
     lp = 0.0
 
-    # log likelihood is sum over seasons and bins
+    # log likelihood summed over seasons
     for k in range(K):
         ds = seasons[k]
         mu = expected_counts_base(
@@ -541,7 +548,7 @@ def log_posterior_hierarchical(theta, seasons, parameterization = "centered", pr
             ds.E_widths,
             phi_k[k],
             gamma_val,
-            eta,
+            eta_k[k],
             delta_val,
             eta_prompt=eta_prompt,
             model_options=ds.model_options,
@@ -550,48 +557,54 @@ def log_posterior_hierarchical(theta, seasons, parameterization = "centered", pr
             return -np.inf
         lp += poisson_log_likelihood(ds.counts, mu)
 
+    # hierarchical prior on log_phi_k
     if parameterization == "centered":
-        # log_phi_k | mu_phi, sigma_phi ~ N(mu_phi, sigma_phi^2)
-        log_phi_k = p["log_phi_k"]
         lp += -0.5 * K * np.log(2 * np.pi) - K * np.log(sigma_phi)
         lp += -0.5 * np.sum(((log_phi_k - mu_phi) / sigma_phi)**2)
-    
-    elif parameterization == "noncentered":
-        # z_k ~ N(0, 1)
-        z_k = p["z_k"]
+    else:
+        z_phi_k = p["z_phi_k"]
         lp += -0.5 * K * np.log(2 * np.pi)
-        lp += -0.5 * np.sum(z_k**2)
+        lp += -0.5 * np.sum(z_phi_k**2)
 
-    # hyperpriors for population center of log-phi
+    # hierarchical prior on log_eta_k
+    if parameterization == "centered":
+        lp += -0.5 * K * np.log(2 * np.pi) - K * np.log(sigma_eta)
+        lp += -0.5 * np.sum(((log_eta_k - mu_eta) / sigma_eta)**2)
+    else:
+        z_eta_k = p["z_eta_k"]
+        lp += -0.5 * K * np.log(2 * np.pi)
+        lp += -0.5 * np.sum(z_eta_k**2)
+
+    # hyperpriors for phi population
     mu_phi_prior_mean = mo0.get("prior_mu_phi_mean", mo0.get("prior_phi_log_mean", 0.0))
     mu_phi_prior_sd = mo0.get("prior_mu_phi_sd", mo0.get("prior_phi_log_sd", np.sqrt(10.0)))
     lp += -0.5 * ((mu_phi - mu_phi_prior_mean) / mu_phi_prior_sd)**2
+    lp += -np.log(1 + sigma_phi**2)  # sigma_phi ~ Half-Cauchy(0, 1)
 
-    # sigma_phi = Half-Cauchy(0, 1)
-    lp += -np.log(1 + sigma_phi**2)
+    # hyperpriors for eta population
+    mu_eta_prior_mean = mo0.get("prior_mu_eta_mean", mo0.get("prior_eta_log_mean", np.log(1e-5)))
+    mu_eta_prior_sd = mo0.get("prior_mu_eta_sd", mo0.get("prior_eta_log_sd", 1.0))
+    lp += -0.5 * ((mu_eta - mu_eta_prior_mean) / mu_eta_prior_sd)**2
+    lp += -np.log(1 + sigma_eta**2)  # sigma_eta ~ Half-Cauchy(0, 1)
 
-    # shared parame priors
+    # shared parameter priors
     delta_mean = mo0.get("prior_delta_mean", 3.7)
     delta_sd = mo0.get("prior_delta_sd", 0.15)
     lp += -0.5 * ((delta_val - delta_mean) / delta_sd)**2
 
     if prior_type == "flat":
         pass
-    
+
     elif prior_type == "weakly":
         gamma_mean = mo0.get("prior_gamma_mean", 2.5)
         gamma_sd = mo0.get("prior_gamma_sd", 0.4)
-        eta_log_mean = mo0.get("prior_eta_log_mean", np.log(1e-5))
-        eta_log_sd = mo0.get("prior_eta_log_sd", 1.0)
         lp += -0.5 * ((gamma_val - gamma_mean) / gamma_sd)**2
-        lp += -0.5 * ((np.log(eta) - eta_log_mean) / eta_log_sd)**2 - np.log(eta)
         if eta_prompt is not None:
             prompt_log_mean = mo0.get("prompt_prior_log_mean", np.log(1e-6))
             prompt_log_sd = mo0.get("prompt_prior_log_sd", 1.0)
             lp += -0.5 * ((np.log(eta_prompt) - prompt_log_mean) / prompt_log_sd)**2 - np.log(eta_prompt)
 
     elif prior_type == "lognormal_gamma":
-        # gamma = LogNormal(log(2.5), 0.2^2)
         if gamma_val <= 0:
             return -np.inf
         lp += -0.5 * ((np.log(gamma_val) - np.log(2.5)) / 0.2)**2 - np.log(gamma_val)
@@ -599,13 +612,14 @@ def log_posterior_hierarchical(theta, seasons, parameterization = "centered", pr
     else:
         raise ValueError(f"Unknown prior type: {prior_type}")
 
-
-    # log_eta = eta
-    lp += p["log_eta"]
+    # Jacobians: sigma_phi and sigma_eta transforms, and eta_prompt if present.
+    # No Jacobian needed for log_phi_k or log_eta_k: the hierarchical Gaussian prior is
+    # directly on the log-space variable, so the lognormal -log(eta_k) term and the
+    # +log(eta_k) Jacobian cancel exactly.
+    lp += p["log_sigma_phi"]
+    lp += p["log_sigma_eta"]
     if log_eta_prompt is not None:
         lp += log_eta_prompt
-    # log_sigma_phi = sigma_phi
-    lp += p["log_sigma_phi"]
 
     return lp
 
@@ -614,7 +628,7 @@ def grad_log_posterior_hierarchical(theta, seasons, parameterization="centered",
     K = len(seasons)
     mo0 = seasons[0].model_options if K > 0 else {}
     allow_prompt = _uses_free_prompt(mo0)
-    expected_dim = K + 6 if allow_prompt else K + 5
+    expected_dim = 2 * K + 7 if allow_prompt else 2 * K + 6
     if len(theta) != expected_dim:
         return np.zeros(expected_dim)
 
@@ -628,20 +642,33 @@ def grad_log_posterior_hierarchical(theta, seasons, parameterization="centered",
     phi_k = p["phi_k"]
     log_phi_k = p["log_phi_k"]
     gamma_val = p["gamma"]
-    eta = p["eta"]
-    log_eta = p["log_eta"]
+    eta_k = p["eta_k"]
+    log_eta_k = p["log_eta_k"]
     delta_val = p["delta"]
     mu_phi = p["mu_phi"]
     sigma_phi = p["sigma_phi"]
     log_sigma_phi = p["log_sigma_phi"]
+    mu_eta = p["mu_eta"]
+    sigma_eta = p["sigma_eta"]
+    log_sigma_eta = p["log_sigma_eta"]
 
     eta_prompt = p["eta_prompt"] if allow_prompt else None
     log_eta_prompt = p["log_eta_prompt"] if allow_prompt else None
 
     has_prompt = allow_prompt
-    n_params = K + 6 if has_prompt else K + 5
+    n_params = 2 * K + 7 if has_prompt else 2 * K + 6
+    p_offset = 1 if has_prompt else 0
 
-    if eta <= 0 or sigma_phi <= 0 or np.any(phi_k <= 0):
+    # named indices for shared parameters
+    gamma_idx = 2 * K
+    delta_idx = 2 * K + 1
+    prompt_idx = 2 * K + 2  # only used if has_prompt
+    mu_phi_idx = 2 * K + 2 + p_offset
+    lsig_phi_idx = 2 * K + 3 + p_offset
+    mu_eta_idx = 2 * K + 4 + p_offset
+    lsig_eta_idx = 2 * K + 5 + p_offset
+
+    if sigma_phi <= 0 or sigma_eta <= 0 or np.any(phi_k <= 0) or np.any(eta_k <= 0):
         return np.zeros(n_params)
     if eta_prompt is not None and eta_prompt <= 0:
         return np.zeros(n_params)
@@ -650,13 +677,14 @@ def grad_log_posterior_hierarchical(theta, seasons, parameterization="centered",
 
     # Accumulators for shared parameters
     d_gamma = 0.0
-    d_log_eta = 0.0
     d_delta = 0.0
     d_log_eta_prompt = 0.0
 
-    # These differ by parameterization, but it's convenient to accumulate them here
+    # Accumulators for hyperparameter likelihood contributions (noncentered only)
     d_mu_phi_like = 0.0
-    d_log_sigma_like = 0.0
+    d_lsig_phi_like = 0.0
+    d_mu_eta_like = 0.0
+    d_lsig_eta_like = 0.0
 
     for k, ds in enumerate(seasons):
         comp = _component_terms(
@@ -664,14 +692,12 @@ def grad_log_posterior_hierarchical(theta, seasons, parameterization="centered",
             E_widths=ds.E_widths,
             phi=phi_k[k],
             gamma=gamma_val,
-            eta=eta,
+            eta=eta_k[k],
             delta=delta_val,
             eta_prompt=eta_prompt,
             model_options=ds.model_options,
         )
-        mu_sig = comp["mu_sig"]
-        mu_bg = comp["mu_bg"]
-        mu = mu_sig + mu_bg
+        mu = comp["mu_sig"] + comp["mu_bg"]
 
         if np.any((mu <= 0) & (ds.counts > 0)):
             return np.zeros(n_params)
@@ -680,110 +706,115 @@ def grad_log_posterior_hierarchical(theta, seasons, parameterization="centered",
         positive_mu = mu > 0
         ratio[positive_mu] = ds.counts[positive_mu] / mu[positive_mu] - 1.0
 
-        # Shared parameter gradients from likelihood
         d_gamma += np.sum(ratio * comp["dmu_dgamma"])
-        d_log_eta += eta * np.sum(ratio * comp["dmu_deta"])
         d_delta += np.sum(ratio * comp["dmu_ddelta"])
         if has_prompt:
             if comp["dmu_deta_prompt"] is None:
                 return np.zeros(n_params)
             d_log_eta_prompt += eta_prompt * np.sum(ratio * comp["dmu_deta_prompt"])
 
+        dL_dphi_k = np.sum(ratio * comp["dmu_dphi"])
+        dL_deta_k = np.sum(ratio * comp["dmu_deta"])
+
         if parameterization == "centered":
-            # theta_k = log_phi_k
+            # grad wrt log_phi_k: likelihood + hierarchical prior
             grad[k] = (
-                phi_k[k] * np.sum(ratio * comp["dmu_dphi"])
+                phi_k[k] * dL_dphi_k
                 - (log_phi_k[k] - mu_phi) / sigma_phi**2
             )
+            # grad wrt log_eta_k: likelihood + hierarchical prior (no Jacobian: cancels in Gaussian form)
+            grad[K + k] = (
+                eta_k[k] * dL_deta_k
+                - (log_eta_k[k] - mu_eta) / sigma_eta**2
+            )
         else:
-            # theta_k = z_k, where log_phi_k = mu_phi + sigma_phi z_k
-            z_k = p["z_k"][k]
-            grad[k] = sigma_phi * phi_k[k] * np.sum(ratio * comp["dmu_dphi"]) - z_k
+            # noncentered: grad wrt z_phi_k and z_eta_k
+            z_phi_k_val = p["z_phi_k"][k]
+            z_eta_k_val = p["z_eta_k"][k]
+            grad[k] = sigma_phi * phi_k[k] * dL_dphi_k - z_phi_k_val
+            grad[K + k] = sigma_eta * eta_k[k] * dL_deta_k - z_eta_k_val
+            # accumulate hyperparameter likelihood contributions
+            d_mu_phi_like += phi_k[k] * dL_dphi_k
+            d_lsig_phi_like += sigma_phi * z_phi_k_val * phi_k[k] * dL_dphi_k
+            d_mu_eta_like += eta_k[k] * dL_deta_k
+            d_lsig_eta_like += sigma_eta * z_eta_k_val * eta_k[k] * dL_deta_k
 
-        # Contributions to hyperparameter gradients
-        if parameterization == "centered":
-            # no likelihood contribution to mu_phi or log_sigma_phi in centered coords
-            pass
-        else:
-            # non-centered: likelihood depends on mu_phi and sigma_phi through phi_k
-            z_k = p["z_k"][k]
-            d_mu_phi_like += phi_k[k] * np.sum(ratio * comp["dmu_dphi"])
-            d_log_sigma_like += sigma_phi * z_k * phi_k[k] * np.sum(ratio * comp["dmu_dphi"])
+    # gamma gradient
+    grad[gamma_idx] = d_gamma
 
-    # Shared priors / Jacobians for shared params
-    grad[K] = d_gamma
-    grad[K + 1] = d_log_eta
-    grad[K + 2] = d_delta
-    prompt_offset = 1 if has_prompt else 0
-    if has_prompt:
-        grad[K + 3] = d_log_eta_prompt
-
+    # delta gradient (always has Normal prior)
     delta_mean = mo0.get("prior_delta_mean", 3.7)
     delta_sd = mo0.get("prior_delta_sd", 0.15)
-    grad[K + 2] += -(delta_val - delta_mean) / (delta_sd**2)
+    grad[delta_idx] = d_delta - (delta_val - delta_mean) / delta_sd**2
 
+    # gamma prior and prompt prior depend on prior_type
     if prior_type == "flat":
-        pass
+        if has_prompt:
+            # eta_prompt flat in natural space: only Jacobian
+            grad[prompt_idx] = d_log_eta_prompt + 1.0
 
     elif prior_type == "weakly":
         gamma_mean = mo0.get("prior_gamma_mean", 2.5)
         gamma_sd = mo0.get("prior_gamma_sd", 0.4)
-        eta_log_mean = mo0.get("prior_eta_log_mean", np.log(1e-5))
-        eta_log_sd = mo0.get("prior_eta_log_sd", 1.0)
-
-        grad[K] += -(gamma_val - gamma_mean) / (gamma_sd**2)
-
-        # eta ~ LogNormal(eta_log_mean, eta_log_sd)
-        # prior derivative wrt log_eta: -(log_eta - eta_log_mean)/eta_log_sd^2 - 1
-        # Jacobian wrt log_eta: +1
-        # net effect: -(log_eta - eta_log_mean)/eta_log_sd^2
-        grad[K + 1] += -(log_eta - eta_log_mean) / (eta_log_sd**2)
+        grad[gamma_idx] += -(gamma_val - gamma_mean) / gamma_sd**2
         if has_prompt:
             prompt_log_mean = mo0.get("prompt_prior_log_mean", np.log(1e-6))
             prompt_log_sd = mo0.get("prompt_prior_log_sd", 1.0)
-            grad[K + 3] += -(log_eta_prompt - prompt_log_mean) / (prompt_log_sd**2)
+            # net of lognormal prior (-log eta_prompt term) + Jacobian (+1): Gaussian gradient only
+            grad[prompt_idx] = d_log_eta_prompt - (log_eta_prompt - prompt_log_mean) / prompt_log_sd**2
 
     elif prior_type == "lognormal_gamma":
         if gamma_val <= 0:
             return np.zeros(n_params)
-        grad[K] += -((np.log(gamma_val) - np.log(2.5)) / 0.2**2) * (1.0 / gamma_val) - 1.0 / gamma_val
-
-        # eta is flat in this case, so only Jacobian remains
-        grad[K + 1] += 1.0
+        grad[gamma_idx] += -((np.log(gamma_val) - np.log(2.5)) / 0.2**2) * (1.0 / gamma_val) - 1.0 / gamma_val
         if has_prompt:
-            grad[K + 3] += 1.0
+            grad[prompt_idx] = d_log_eta_prompt + 1.0
 
     else:
         raise ValueError(f"Unknown prior type: {prior_type}")
 
-    if prior_type == "flat":
-        # eta flat in natural space, so transformed-space Jacobian contributes +1
-        grad[K + 1] += 1.0
-        if has_prompt:
-            grad[K + 3] += 1.0
-
     # Hyperparameter gradients
     mu_phi_prior_mean = mo0.get("prior_mu_phi_mean", mo0.get("prior_phi_log_mean", 0.0))
     mu_phi_prior_sd = mo0.get("prior_mu_phi_sd", mo0.get("prior_phi_log_sd", np.sqrt(10.0)))
+    mu_eta_prior_mean = mo0.get("prior_mu_eta_mean", mo0.get("prior_eta_log_mean", np.log(1e-5)))
+    mu_eta_prior_sd = mo0.get("prior_mu_eta_sd", mo0.get("prior_eta_log_sd", 1.0))
+
     if parameterization == "centered":
-        grad[K + 3 + prompt_offset] = (
+        grad[mu_phi_idx] = (
             np.sum((log_phi_k - mu_phi) / sigma_phi**2)
-            - (mu_phi - mu_phi_prior_mean) / (mu_phi_prior_sd**2)
+            - (mu_phi - mu_phi_prior_mean) / mu_phi_prior_sd**2
         )
-        grad[K + 4 + prompt_offset] = (
-            -K
-            + np.sum((log_phi_k - mu_phi)**2 / sigma_phi**2)
+        grad[lsig_phi_idx] = (
+            -K + np.sum((log_phi_k - mu_phi)**2 / sigma_phi**2)
             - 2.0 * sigma_phi**2 / (1.0 + sigma_phi**2)
             + 1.0  # Jacobian for sigma_phi = exp(log_sigma_phi)
         )
-    else:
-        grad[K + 3 + prompt_offset] = (
-            d_mu_phi_like
-            - (mu_phi - mu_phi_prior_mean) / (mu_phi_prior_sd**2)
+        grad[mu_eta_idx] = (
+            np.sum((log_eta_k - mu_eta) / sigma_eta**2)
+            - (mu_eta - mu_eta_prior_mean) / mu_eta_prior_sd**2
         )
-        grad[K + 4 + prompt_offset] = (
-            d_log_sigma_like
+        grad[lsig_eta_idx] = (
+            -K + np.sum((log_eta_k - mu_eta)**2 / sigma_eta**2)
+            - 2.0 * sigma_eta**2 / (1.0 + sigma_eta**2)
+            + 1.0  # Jacobian for sigma_eta = exp(log_sigma_eta)
+        )
+    else:
+        grad[mu_phi_idx] = (
+            d_mu_phi_like
+            - (mu_phi - mu_phi_prior_mean) / mu_phi_prior_sd**2
+        )
+        grad[lsig_phi_idx] = (
+            d_lsig_phi_like
             - 2.0 * sigma_phi**2 / (1.0 + sigma_phi**2)
+            + 1.0
+        )
+        grad[mu_eta_idx] = (
+            d_mu_eta_like
+            - (mu_eta - mu_eta_prior_mean) / mu_eta_prior_sd**2
+        )
+        grad[lsig_eta_idx] = (
+            d_lsig_eta_like
+            - 2.0 * sigma_eta**2 / (1.0 + sigma_eta**2)
             + 1.0
         )
 
@@ -915,8 +946,9 @@ if __name__ == "__main__":
         K=int(hier_cfg["K"]),
         mu_phi=float(hier_cfg["mu_phi"]),
         sigma_phi=float(hier_cfg["sigma_phi"]),
+        mu_eta=float(hier_cfg["mu_eta"]),
+        sigma_eta=float(hier_cfg["sigma_eta"]),
         gamma=float(hier_cfg["gamma"]),
-        eta=float(hier_cfg["eta"]),
         delta=float(hier_cfg["delta"]),
         truth_model=hier_cfg["truth_model"],
         atmo_model=atmo_cfg["model"],
@@ -946,28 +978,29 @@ if __name__ == "__main__":
     )
     K = len(hds.seasons)
     infer_prompt_eta_hier = bool(hds.seasons[0].model_options.get("infer_prompt_eta", False))
-    shared_true = [
-        hds.true_params["gamma"],
-        np.log(hds.true_params["eta"]),
-        hds.true_params["delta"],
-    ]
+    mu_phi = hds.true_params["mu_phi"]
+    sigma_phi = hds.true_params["sigma_phi"]
+    mu_eta = hds.true_params["mu_eta"]
+    sigma_eta = hds.true_params["sigma_eta"]
+
+    # shared params: [gamma, delta, (log_eta_prompt), mu_phi, log_sigma_phi, mu_eta, log_sigma_eta]
+    shared_true = [hds.true_params["gamma"], hds.true_params["delta"]]
     if infer_prompt_eta_hier:
         shared_true.append(np.log(hds.seasons[0].true_params["eta_prompt"]))
-    shared_true.extend([hds.true_params["mu_phi"], np.log(hds.true_params["sigma_phi"])])
+    shared_true.extend([mu_phi, np.log(sigma_phi), mu_eta, np.log(sigma_eta)])
 
-    # centered parameterization theta = [log_phi_1,...,shared...]
-    theta_hier = np.concatenate([np.log(hds.phi_k), shared_true])
-    
-    
-    sigma_phi = hds.true_params["sigma_phi"]
-    mu_phi = hds.true_params["mu_phi"]
-    z_k = (np.log(hds.phi_k) - mu_phi) / sigma_phi
+    # centered: theta = [log_phi_1,...,log_phi_K, log_eta_1,...,log_eta_K, shared...]
+    theta_hier = np.concatenate([np.log(hds.phi_k), np.log(hds.eta_k), shared_true])
 
-    shared_true_nc = [hds.true_params["gamma"], np.log(hds.true_params["eta"]), hds.true_params["delta"]]
+    z_phi_k = (np.log(hds.phi_k) - mu_phi) / sigma_phi
+    z_eta_k = (np.log(hds.eta_k) - mu_eta) / sigma_eta
+
+    shared_true_nc = [hds.true_params["gamma"], hds.true_params["delta"]]
     if infer_prompt_eta_hier:
         shared_true_nc.append(np.log(hds.seasons[0].true_params["eta_prompt"]))
-    shared_true_nc.extend([mu_phi, np.log(sigma_phi)])
-    theta_nc = np.concatenate([z_k, shared_true_nc])
+    shared_true_nc.extend([mu_phi, np.log(sigma_phi), mu_eta, np.log(sigma_eta)])
+    # noncentered: theta = [z_phi_1,...,z_phi_K, z_eta_1,...,z_eta_K, shared...]
+    theta_nc = np.concatenate([z_phi_k, z_eta_k, shared_true_nc])
 
     for prior_type in test_cfg["hierarchical_prior_types"]:
         print(f"{prior_type.upper()} PRIOR CASE")
