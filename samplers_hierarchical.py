@@ -5,6 +5,7 @@ Here we implement RWMH, MALA. And provide trace plots, Rhat, ESS, Autocorrelatio
 """
 
 import numpy as np
+import pandas as pd
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -164,6 +165,7 @@ def run_mala(
     precond_shrinkage: float = 0.1,      # only used for dense
     precond_ridge: float = 1e-6,
     normalize_precond: bool = True,
+    log_posterior_and_grad_fn: Optional[Callable] = None,  # if provided, replaces separate log_posterior_fn + grad calls
 ) -> MCMCResult:
     """
     Uses a preconditioning matrix M to improve the geometry of MALA gradients
@@ -189,8 +191,11 @@ def run_mala(
     log_posts = np.zeros(n_iterations)
 
     theta = theta_init.copy()
-    lp = log_posterior_fn(theta)
-    grad = grad_log_posterior_fn(theta)
+    if log_posterior_and_grad_fn is not None:
+        lp, grad = log_posterior_and_grad_fn(theta)
+    else:
+        lp = log_posterior_fn(theta)
+        grad = grad_log_posterior_fn(theta)
 
     if not np.isfinite(lp):
         raise ValueError("Initial log posterior is not finite")
@@ -257,11 +262,16 @@ def run_mala(
             mean_fwd = theta + 0.5 * eps * (precond @ grad)
             theta_proposed = mean_fwd + np.sqrt(eps) * (chol_precond @ z)
 
-        # evaluate at proposal
-        lp_proposed = log_posterior_fn(theta_proposed)
+        # evaluate at proposal (combined call avoids computing _component_terms twice)
+        if log_posterior_and_grad_fn is not None:
+            lp_proposed, grad_proposed = log_posterior_and_grad_fn(theta_proposed)
+        else:
+            lp_proposed = log_posterior_fn(theta_proposed)
+            grad_proposed = None
 
         if np.isfinite(lp_proposed):
-            grad_proposed = grad_log_posterior_fn(theta_proposed)
+            if grad_proposed is None:
+                grad_proposed = grad_log_posterior_fn(theta_proposed)
 
             if precond_type == "diag":
                 diff_fwd = theta_proposed - mean_fwd
@@ -771,10 +781,96 @@ def save_traceplots_multi_hierarchical(results: list[MCMCResult],filename: str,p
     fig.savefig(filename, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
+def diagnostics_dataframe_hierarchical(
+    results_by_sampler: dict[str, list[MCMCResult]],
+    parameterization: str,
+    K: int,
+    latent_display: str = "log_phi",
+) -> dict[str, pd.DataFrame]:
+    """
+    Returns three DataFrames (ESS, ESS/s, Rhat) indexed by sampler name,
+    with one column per transformed parameter plus metadata columns.
+    """
+    first_results = next(iter(results_by_sampler.values()))
+    stacked0 = _stack_chains(first_results)
+    _, param_names = transform_hierarchical_samples(
+        stacked0, parameterization=parameterization, K=K, latent_display=latent_display
+    )
+    d = len(param_names)
+
+    ess_rows, ess_per_s_rows, rhat_rows = [], [], []
+
+    for sampler_name, results in results_by_sampler.items():
+        stacked = _stack_chains(results)
+        transformed, _ = transform_hierarchical_samples(
+            stacked, parameterization=parameterization, K=K, latent_display=latent_display
+        )
+        mean_accept = float(np.mean([r.acceptance_rate for r in results]))
+        total_time = float(np.sum([r.wall_time for r in results]))
+
+        ess_vals = [effective_sample_size_multi(transformed[:, :, j]) for j in range(d)]
+        rhat_vals = [split_rhat(transformed[:, :, j]) for j in range(d)]
+
+        base = {"sampler": sampler_name, "n_chains": len(results),
+                "accept_rate": mean_accept, "wall_time_s": total_time}
+
+        ess_rows.append({**base, **{name: ess for name, ess in zip(param_names, ess_vals)}})
+        ess_per_s_rows.append({**base, **{name: ess / total_time for name, ess in zip(param_names, ess_vals)}})
+        rhat_rows.append({**base, **{name: rhat for name, rhat in zip(param_names, rhat_vals)}})
+
+    def _make_df(rows):
+        return pd.DataFrame(rows).set_index("sampler")
+
+    return {
+        "ess": _make_df(ess_rows),
+        "ess_per_s": _make_df(ess_per_s_rows),
+        "rhat": _make_df(rhat_rows),
+    }
+
+
+def posterior_summary_dataframe_hierarchical(
+    results: list[MCMCResult],
+    parameterization: str,
+    K: int,
+    latent_display: str = "log_phi",
+    ci: float = 0.90,
+    true_values: Optional[dict[str, float]] = None,
+) -> pd.DataFrame:
+    """
+    Returns a DataFrame of posterior summary statistics for the hierarchical model,
+    computed on transformed (interpretable) parameter coordinates.
+    """
+    stacked = _stack_chains(results)
+    transformed, param_names = transform_hierarchical_samples(
+        stacked, parameterization=parameterization, K=K, latent_display=latent_display
+    )
+    d = len(param_names)
+    combined = transformed.reshape(-1, d)
+
+    alpha = 1.0 - ci
+    lo = 100.0 * (alpha / 2.0)
+    hi = 100.0 * (1.0 - alpha / 2.0)
+
+    rows = []
+    for j, name in enumerate(param_names):
+        x = combined[:, j]
+        true_val = None if true_values is None else true_values.get(name, None)
+        rows.append({
+            "param": name,
+            "true": true_val,
+            "mean": float(np.mean(x)),
+            "sd": float(np.std(x, ddof=1)),
+            "median": float(np.median(x)),
+            "ci_lower": float(np.percentile(x, lo)),
+            "ci_upper": float(np.percentile(x, hi)),
+        })
+    return pd.DataFrame(rows).set_index("param")
+
+
 # test
 if __name__ == "__main__":
     from simulator import generate_hierarchical
-    from posteriors import log_posterior_hierarchical, grad_log_posterior_hierarchical
+    from posteriors import log_posterior_hierarchical, grad_log_posterior_hierarchical, make_hierarchical_fns
     from load_config import load_config
 
     config = load_config()
@@ -886,11 +982,9 @@ if __name__ == "__main__":
 
     prior_type = config["priors"]["default"]
 
-    def log_post(theta):
-        return log_posterior_hierarchical(theta, ds.seasons, parameterization, prior_type)
-
-    def grad_log_post(theta):
-        return grad_log_posterior_hierarchical(theta, ds.seasons, parameterization, prior_type)
+    log_post, grad_log_post, log_post_and_grad = make_hierarchical_fns(
+        ds.seasons, parameterization, prior_type
+    )
 
     rwmh_results = run_multiple_chains(
         run_rwmh,
@@ -923,6 +1017,7 @@ if __name__ == "__main__":
         rng=rng,
         log_posterior_fn=log_post,
         grad_log_posterior_fn=grad_log_post,
+        log_posterior_and_grad_fn=log_post_and_grad,
         n_iterations=int(mala_cfg["n_iterations"]),
         n_burnin=int(mala_cfg["n_burnin"]),
         step_size=float(mala_cfg["step_size"]),
@@ -937,6 +1032,13 @@ if __name__ == "__main__":
         normalize_precond=bool(mala_cfg["normalize_precond"]),
     )
 
+    print_diagnostics_multi_hierarchical(
+        {"RWMH": rwmh_results},
+        parameterization=parameterization,
+        K=K,
+        latent_display=test_cfg["latent_display_diagnostics"],
+        true_values=true_values,
+    )
     print_diagnostics_multi_hierarchical(
         {"RWMH": rwmh_results, "MALA": mala_results},
         parameterization=parameterization,
@@ -966,3 +1068,33 @@ if __name__ == "__main__":
         K=K,
         latent_display=test_cfg["latent_display_traceplots"],
     )
+
+    hier_truth_model = hier_cfg["truth_model"]
+    latent_disp = test_cfg["latent_display_diagnostics"]
+    results_by_sampler = {"RWMH": rwmh_results}
+    results_by_sampler["MALA"] = mala_results
+
+    # save posterior summaries as DataFrames
+    for sampler_name, results in results_by_sampler.items():
+        df = posterior_summary_dataframe_hierarchical(
+            results,
+            parameterization=parameterization,
+            K=K,
+            latent_display=latent_disp,
+            true_values=true_values,
+        )
+        path = f"Stats/posterior_summary_hierarchical_{hier_truth_model}_{prior_type}_{parameterization}_{sampler_name.lower()}.csv"
+        df.to_csv(path)
+        print(f"Saved {sampler_name} posterior summary to {path}")
+
+    # save diagnostics tables as DataFrames
+    diag = diagnostics_dataframe_hierarchical(
+        results_by_sampler,
+        parameterization=parameterization,
+        K=K,
+        latent_display=latent_disp,
+    )
+    for table_name, df in diag.items():
+        path = f"Stats/diagnostics_hierarchical_{table_name}_{hier_truth_model}_{prior_type}_{parameterization}.csv"
+        df.to_csv(path)
+        print(f"Saved {table_name} diagnostics to {path}")
