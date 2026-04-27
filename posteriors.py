@@ -820,6 +820,241 @@ def grad_log_posterior_hierarchical(theta, seasons, parameterization="centered",
 
     return grad
 
+# computes log-posterior and its gradient together for the hierarchical model to reduce computational overhead
+def make_hierarchical_fns(seasons, parameterization="noncentered", prior_type="weakly"):
+    K = len(seasons)
+    mo0 = seasons[0].model_options
+    allow_prompt = _uses_free_prompt(mo0)
+
+    E = seasons[0].E_centers
+    E_widths = seasons[0].E_widths
+    n_bins = len(E)
+    log_E_norm = np.log(E / E_REF)
+
+    # Precompute effective response
+    acc0 = mo0.get("detector_acceptance", None)
+    M0 = mo0.get("detector_smearing", None)
+    livetime0 = mo0.get("livetime_years", 1.0)
+    physical0 = bool(mo0.get("physical_flux_units", False))
+    if acc0 is None:
+        acc0 = np.ones(n_bins)
+    if M0 is None:
+        M0 = np.eye(n_bins)
+    exposure0 = livetime0 * (SECONDS_PER_YEAR if physical0 else 1.0)
+    M_eff = M0 * (acc0 * exposure0)  
+
+    # Atmospheric model constants
+    atmo_model = mo0.get("atmo_model", "power_law")
+    prompt_fraction = mo0.get("prompt_fraction", 0.0)
+    delta_prompt_val = mo0.get("delta_prompt", 2.7)
+    E_knee = mo0.get("E_knee", 3e5)
+    knee_sharpness = mo0.get("knee_sharpness", 4.0)
+
+    # Prompt basis
+    if atmo_model == "conv_plus_prompt":
+        knee_factor = (E / E_knee) ** knee_sharpness
+        prompt_shape_raw = np.exp(-delta_prompt_val * log_E_norm)
+        prompt_base_vec = M_eff @ (prompt_shape_raw * E_widths)
+    else:
+        knee_factor = None
+        prompt_shape_raw = None
+        prompt_base_vec = None
+
+    # Stacked counts (K x n_bins)
+    counts_k = np.stack([ds.counts for ds in seasons])
+
+    # Prior constants
+    mu_phi_prior_mean = mo0.get("prior_mu_phi_mean", mo0.get("prior_phi_log_mean", 0.0))
+    mu_phi_prior_sd   = mo0.get("prior_mu_phi_sd",   mo0.get("prior_phi_log_sd",   np.sqrt(10.0)))
+    mu_eta_prior_mean = mo0.get("prior_mu_eta_mean", mo0.get("prior_eta_log_mean", np.log(1e-5)))
+    mu_eta_prior_sd   = mo0.get("prior_mu_eta_sd",   mo0.get("prior_eta_log_sd",   1.0))
+    delta_prior_mean  = mo0.get("prior_delta_mean", 3.7)
+    delta_prior_sd    = mo0.get("prior_delta_sd", 0.15)
+    gamma_mean_val    = mo0.get("prior_gamma_mean", 2.5)
+    gamma_sd_val      = mo0.get("prior_gamma_sd", 0.4)
+    prompt_log_mean   = mo0.get("prompt_prior_log_mean", np.log(1e-6)) if allow_prompt else None
+    prompt_log_sd     = mo0.get("prompt_prior_log_sd", 1.0) if allow_prompt else None
+
+    p_offset     = 1 if allow_prompt else 0
+    expected_dim = 2 * K + 7 if allow_prompt else 2 * K + 6
+    gamma_idx    = 2 * K
+    delta_idx    = 2 * K + 1
+    prompt_idx   = 2 * K + 2
+    mu_phi_idx   = 2 * K + 2 + p_offset
+    lsig_phi_idx = 2 * K + 3 + p_offset
+    mu_eta_idx   = 2 * K + 4 + p_offset
+    lsig_eta_idx = 2 * K + 5 + p_offset
+    LOG_2PI = np.log(2.0 * np.pi)
+
+    # Computes across season response vectors for gamma, delta
+    def _basis(gamma, delta):
+        E_norm_mg = np.exp(-gamma * log_E_norm)
+        sig_base  = M_eff @ (E_norm_mg * E_widths)
+        dgam_base = M_eff @ (-E_norm_mg * log_E_norm * E_widths)
+
+        if atmo_model == "conv_plus_prompt":
+            conv_raw = np.exp(-delta * log_E_norm) / (1.0 + knee_factor)
+            ddel_base = M_eff @ (-conv_raw * log_E_norm * E_widths)
+            if allow_prompt:
+                bg_base = M_eff @ (conv_raw * E_widths)
+            else:
+                bg_base = M_eff @ ((conv_raw + prompt_fraction * prompt_shape_raw) * E_widths)
+        else:
+            bg_raw    = np.exp(-delta * log_E_norm) * E_widths
+            bg_base   = M_eff @ bg_raw
+            ddel_base = M_eff @ (-np.exp(-delta * log_E_norm) * log_E_norm * E_widths)
+
+        return sig_base, bg_base, dgam_base, ddel_base
+
+    def _log_post_and_grad(theta):
+        if len(theta) != expected_dim:
+            return -np.inf, np.zeros(expected_dim)
+
+        if parameterization == "centered":
+            p = unpack_hierarchical_centered(theta, K)
+        else:
+            p = unpack_hierarchical_noncentered(theta, K)
+
+        phi_k        = p["phi_k"]
+        eta_k        = p["eta_k"]
+        log_phi_k    = p["log_phi_k"]
+        log_eta_k    = p["log_eta_k"]
+        gamma_val    = p["gamma"]
+        delta_val    = p["delta"]
+        mu_phi       = p["mu_phi"]
+        sigma_phi    = p["sigma_phi"]
+        log_sigma_phi = p["log_sigma_phi"]
+        mu_eta       = p["mu_eta"]
+        sigma_eta    = p["sigma_eta"]
+        log_sigma_eta = p["log_sigma_eta"]
+        eta_prompt    = p["eta_prompt"] if allow_prompt else None
+        log_eta_prompt = p["log_eta_prompt"] if allow_prompt else None
+
+        if sigma_phi <= 0 or sigma_eta <= 0 or np.any(phi_k <= 0) or np.any(eta_k <= 0):
+            return -np.inf, np.zeros(expected_dim)
+        if eta_prompt is not None and eta_prompt <= 0:
+            return -np.inf, np.zeros(expected_dim)
+
+        sig_base, bg_base, dgam_base, ddel_base = _basis(gamma_val, delta_val)
+
+        # Expected counts for all seasons (K, n_bins)
+        mu_matrix = phi_k[:, np.newaxis] * sig_base + eta_k[:, np.newaxis] * bg_base
+        if allow_prompt:
+            mu_matrix = mu_matrix + eta_prompt * prompt_base_vec
+
+        if np.any((mu_matrix <= 0) & (counts_k > 0)):
+            return -np.inf, np.zeros(expected_dim)
+
+        # Poisson log-likelihood
+        safe_log_mu = np.where(mu_matrix > 0, np.log(mu_matrix), 0.0)
+        lp = float(-mu_matrix.sum() + np.sum(counts_k * safe_log_mu))
+
+        
+        ratio = np.where(counts_k > 0, counts_k / mu_matrix - 1.0, -1.0)
+
+        # Per-season likelihood gradients (K x 1)
+        dL_dphi_k = ratio @ sig_base       
+        dL_deta_k = ratio @ bg_base       
+        d_gamma   = float(np.dot(phi_k, ratio @ dgam_base))
+        d_delta   = float(np.dot(eta_k, ratio @ ddel_base))
+
+        grad = np.zeros(expected_dim)
+
+        if parameterization == "centered":
+            grad[:K]    = phi_k * dL_dphi_k - (log_phi_k - mu_phi) / sigma_phi**2
+            grad[K:2*K] = eta_k * dL_deta_k - (log_eta_k - mu_eta) / sigma_eta**2
+
+            lp += -0.5 * K * LOG_2PI - K * log_sigma_phi
+            lp += -0.5 * np.sum(((log_phi_k - mu_phi) / sigma_phi)**2)
+            lp += -0.5 * K * LOG_2PI - K * log_sigma_eta
+            lp += -0.5 * np.sum(((log_eta_k - mu_eta) / sigma_eta)**2)
+
+            resid_phi = (log_phi_k - mu_phi) / sigma_phi**2
+            resid_eta = (log_eta_k - mu_eta) / sigma_eta**2
+            grad[mu_phi_idx]   = resid_phi.sum() - (mu_phi - mu_phi_prior_mean) / mu_phi_prior_sd**2
+            grad[lsig_phi_idx] = (-K + np.dot(log_phi_k - mu_phi, resid_phi)
+                                  - 2.0 * sigma_phi**2 / (1.0 + sigma_phi**2) + 1.0)
+            grad[mu_eta_idx]   = resid_eta.sum() - (mu_eta - mu_eta_prior_mean) / mu_eta_prior_sd**2
+            grad[lsig_eta_idx] = (-K + np.dot(log_eta_k - mu_eta, resid_eta)
+                                  - 2.0 * sigma_eta**2 / (1.0 + sigma_eta**2) + 1.0)
+
+        else:  # noncentered
+            z_phi_k = p["z_phi_k"]
+            z_eta_k = p["z_eta_k"]
+
+            grad[:K]    = sigma_phi * phi_k * dL_dphi_k - z_phi_k
+            grad[K:2*K] = sigma_eta * eta_k * dL_deta_k - z_eta_k
+
+            lp += -0.5 * K * LOG_2PI - 0.5 * np.dot(z_phi_k, z_phi_k)
+            lp += -0.5 * K * LOG_2PI - 0.5 * np.dot(z_eta_k, z_eta_k)
+
+            phi_times_dL = phi_k * dL_dphi_k
+            eta_times_dL = eta_k * dL_deta_k
+            grad[mu_phi_idx]   = phi_times_dL.sum() - (mu_phi - mu_phi_prior_mean) / mu_phi_prior_sd**2
+            grad[lsig_phi_idx] = (np.dot(sigma_phi * z_phi_k, phi_times_dL)
+                                  - 2.0 * sigma_phi**2 / (1.0 + sigma_phi**2) + 1.0)
+            grad[mu_eta_idx]   = eta_times_dL.sum() - (mu_eta - mu_eta_prior_mean) / mu_eta_prior_sd**2
+            grad[lsig_eta_idx] = (np.dot(sigma_eta * z_eta_k, eta_times_dL)
+                                  - 2.0 * sigma_eta**2 / (1.0 + sigma_eta**2) + 1.0)
+
+        # Hyperpriors
+        lp += -0.5 * ((mu_phi - mu_phi_prior_mean) / mu_phi_prior_sd)**2
+        lp += -np.log(1.0 + sigma_phi**2)
+        lp += -0.5 * ((mu_eta - mu_eta_prior_mean) / mu_eta_prior_sd)**2
+        lp += -np.log(1.0 + sigma_eta**2)
+
+        # Delta prior and gradient
+        lp += -0.5 * ((delta_val - delta_prior_mean) / delta_prior_sd)**2
+        grad[delta_idx] = d_delta - (delta_val - delta_prior_mean) / delta_prior_sd**2
+
+        # Jacobians for sigma_phi, sigma_eta (log-space transforms)
+        lp += log_sigma_phi + log_sigma_eta
+
+        # Prompt: likelihood gradient, Jacobian, and prior
+        if allow_prompt:
+            d_log_eta_prompt = eta_prompt * float(np.sum(ratio * prompt_base_vec))
+            lp += log_eta_prompt  # Jacobian for eta_prompt -> log_eta_prompt
+
+        # Prior-type-specific gamma prior (and prompt prior)
+        if prior_type == "flat":
+            grad[gamma_idx] = d_gamma
+            if allow_prompt:
+                grad[prompt_idx] = d_log_eta_prompt + 1.0
+
+        elif prior_type == "weakly":
+            lp += -0.5 * ((gamma_val - gamma_mean_val) / gamma_sd_val)**2
+            grad[gamma_idx] = d_gamma - (gamma_val - gamma_mean_val) / gamma_sd_val**2
+            if allow_prompt:
+                # lognormal prior: -0.5*(...) - log_eta_prompt; combined with Jacobian +log_eta_prompt → net -0.5*(...)
+                lp += -0.5 * ((log_eta_prompt - prompt_log_mean) / prompt_log_sd)**2 - log_eta_prompt
+                grad[prompt_idx] = d_log_eta_prompt - (log_eta_prompt - prompt_log_mean) / prompt_log_sd**2
+
+        elif prior_type == "lognormal_gamma":
+            if gamma_val <= 0:
+                return -np.inf, np.zeros(expected_dim)
+            lp += -0.5 * ((np.log(gamma_val) - np.log(2.5)) / 0.2)**2 - np.log(gamma_val)
+            grad[gamma_idx] = (d_gamma
+                               - ((np.log(gamma_val) - np.log(2.5)) / 0.2**2) * (1.0 / gamma_val)
+                               - 1.0 / gamma_val)
+            if allow_prompt:
+                grad[prompt_idx] = d_log_eta_prompt + 1.0
+
+        else:
+            raise ValueError(f"Unknown prior type: {prior_type}")
+
+        return float(lp), grad
+
+    def _log_post(theta):
+        lp, _ = _log_post_and_grad(theta)
+        return lp
+
+    def _grad(theta):
+        _, g = _log_post_and_grad(theta)
+        return g
+
+    return _log_post, _grad, _log_post_and_grad
+
+
 # sanity check for gradient of hierarchical model
 def verify_gradient_hierarchical(theta, seasons, parameterization = "centered", prior_type = "weakly", eps = 1e-5) -> dict:
     analytic = grad_log_posterior_hierarchical(theta, seasons, parameterization, prior_type)
