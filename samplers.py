@@ -897,7 +897,7 @@ if __name__ == "__main__":
     for sampler_name, results in [("RWMH", rwmh_results), ("MALA", mala_results)]:
         summary = posterior_summary_multi(results, true_values=true_values)
         df = pd.DataFrame(summary).T
-        path = test_cfg.get(f"posterior_summary_base_{truth_model}_{prior_type}_{sampler_name.lower()}", f"Stats/posterior_summary_base_cutoff_{prior_type}_{sampler_name.lower()}.csv")
+        path = test_cfg.get(f"posterior_summary_base_{test_cfg["truth_model"]}_{prior_type}_{sampler_name.lower()}", f"stats/posterior_summary_base_cutoff_{prior_type}_{sampler_name.lower()}.csv")
         df.to_csv(path)
         print(f"Saved {sampler_name} posterior summary to {path}")
 
@@ -905,7 +905,7 @@ if __name__ == "__main__":
     truth_model = test_cfg["truth_model"]
     diag = diagnostics_dataframe({"RWMH": rwmh_results, "MALA": mala_results})
     for table_name, df in diag.items():
-        path = f"Stats/diagnostics_{table_name}_{truth_model}_{prior_type}.csv"
+        path = f"stats/diagnostics_{table_name}_{test_cfg["truth_model"]}_{prior_type}.csv"
         df.to_csv(path)
         print(f"Saved {table_name} diagnostics to {path}")
     
