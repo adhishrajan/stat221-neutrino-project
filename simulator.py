@@ -49,6 +49,19 @@ def signal_cutoff(E, phi, gamma, E_cut, E_widths) -> np.ndarray:
     return phi * (E / E_REF)**(-gamma) * np.exp(-E / E_cut) * E_widths
 
 
+def signal_counts_for_model(E, E_widths, model: str, params: dict) -> np.ndarray:
+    """Unified signal expected-count helper dispatching to SPL/BPL/Cutoff."""
+    if model == "power_law":
+        return signal_power_law(E, params["phi"], params["gamma"], E_widths)
+    if model == "broken_power_law":
+        return signal_broken_power_law(
+            E, params["phi"], params["gamma1"], params["gamma2"], params["E_break"], E_widths,
+        )
+    if model == "cutoff":
+        return signal_cutoff(E, params["phi"], params["gamma"], params["E_cut"], E_widths)
+    raise ValueError(f"Unknown signal model: {model}")
+
+
 # BACKGROUND MODEL
 
 def atmospheric_shape(
