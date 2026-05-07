@@ -2,14 +2,16 @@
 Here we generate synthetic bin counts under multiple truth models
 """
 
+from __future__ import annotations
+
 import numpy as np
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 
 
-def make_energy_bins(n_bins = 20, E_min = 1e4, E_max = 1e7) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def make_energy_bins(n_bins = 20, E_min = 1e4, E_max = 1e7) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     E_edges = np.logspace(np.log10(E_min), np.log10(E_max), n_bins + 1)
     E_centers = np.sqrt(E_edges[:-1] * E_edges[1:])   # geometric mean
     E_widths = E_edges[1:] - E_edges[:-1]
@@ -23,22 +25,40 @@ def signal_power_law(E, phi, gamma, E_widths) -> np.ndarray:
     Single power law signal, mu_i^signal = phi * (E_i/E_ref)^{-gamma} * dE_i
     We use the normalized energy E/E_ref to keep phi at a good scale.
     """
-    return phi * (E / E_REF)**(-gamma) * E_widths
+    E = np.asarray(E, dtype=float)
+    E_widths = np.asarray(E_widths, dtype=float)
+    if (not np.isfinite(phi)) or phi <= 0 or (not np.isfinite(gamma)):
+        return np.full_like(E, np.nan, dtype=float)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        log_mu = np.log(phi) - gamma * np.log(E / E_REF)
+        mu = np.exp(np.clip(log_mu, -745.0, 700.0))
+        mu = np.where(log_mu > 700.0, np.inf, mu)
+        mu = np.where(log_mu < -745.0, 0.0, mu)
+    return mu * E_widths
 
 
 def signal_broken_power_law(E, phi, gamma1, gamma2, E_break, E_widths) -> np.ndarray:
     """
     Broken power law, slope gamma1 below E_break, gamma2 above.
     """
+    E = np.asarray(E, dtype=float)
+    E_widths = np.asarray(E_widths, dtype=float)
+    if (
+        (not np.isfinite(phi)) or phi <= 0 or
+        (not np.isfinite(gamma1)) or (not np.isfinite(gamma2)) or
+        (not np.isfinite(E_break)) or E_break <= 0
+    ):
+        return np.full_like(E, np.nan, dtype=float)
+
     E_norm = E / E_REF
     E_break_norm = E_break / E_REF
-    # phi * E_break_norm^{-gamma1} = A * E_break_norm^{-gamma2} for continuity
-    A = phi * E_break_norm**(gamma2 - gamma1)
-    mu = np.where(
-        E < E_break,
-        phi * E_norm**(-gamma1),
-        A * E_norm**(-gamma2)
-    )
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        log_mu_lo = np.log(phi) - gamma1 * np.log(E_norm)
+        log_mu_hi = np.log(phi) + (gamma2 - gamma1) * np.log(E_break_norm) - gamma2 * np.log(E_norm)
+        log_mu = np.where(E < E_break, log_mu_lo, log_mu_hi)
+        mu = np.exp(np.clip(log_mu, -745.0, 700.0))
+        mu = np.where(log_mu > 700.0, np.inf, mu)
+        mu = np.where(log_mu < -745.0, 0.0, mu)
     return mu * E_widths
 
 
@@ -46,7 +66,41 @@ def signal_cutoff(E, phi, gamma, E_cut, E_widths) -> np.ndarray:
     """
     Power law with exponential cutoff, phi * (E/E_ref)^{-gamma} * exp(-E / E_cut) * dE_i
     """
-    return phi * (E / E_REF)**(-gamma) * np.exp(-E / E_cut) * E_widths
+    E = np.asarray(E, dtype=float)
+    E_widths = np.asarray(E_widths, dtype=float)
+    if (not np.isfinite(phi)) or phi <= 0 or (not np.isfinite(gamma)) or (not np.isfinite(E_cut)) or E_cut <= 0:
+        return np.full_like(E, np.nan, dtype=float)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        log_mu = np.log(phi) - gamma * np.log(E / E_REF) - (E / E_cut)
+        mu = np.exp(np.clip(log_mu, -745.0, 700.0))
+        mu = np.where(log_mu > 700.0, np.inf, mu)
+        mu = np.where(log_mu < -745.0, 0.0, mu)
+    return mu * E_widths
+
+
+def signal_counts_for_model(
+    E,
+    E_widths,
+    model: str,
+    params: dict,
+) -> np.ndarray:
+    """
+    Unified signal expected-count helper for SPL/BPL/Cutoff models.
+    """
+    if model == "power_law":
+        return signal_power_law(E, params["phi"], params["gamma"], E_widths)
+    if model == "broken_power_law":
+        return signal_broken_power_law(
+            E,
+            params["phi"],
+            params["gamma1"],
+            params["gamma2"],
+            params["E_break"],
+            E_widths,
+        )
+    if model == "cutoff":
+        return signal_cutoff(E, params["phi"], params["gamma"], params["E_cut"], E_widths)
+    raise ValueError(f"Unknown signal model: {model}")
 
 
 def signal_counts_for_model(E, E_widths, model: str, params: dict) -> np.ndarray:
@@ -156,7 +210,7 @@ def load_hese75_derived_response(
     aeff_allsky_path: str,
     migration_path: str,
     sky_factor_sr: float = 4.0 * np.pi,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load precomputed HESE 7.5-year derived response:
       - sky-averaged Aeff(E_true) table [m^2]
@@ -285,7 +339,6 @@ class HierarchicalDataset:
     true_params: dict
     # (K,) season specific true fluxes
     phi_k: np.ndarray
-    eta_k: np.ndarray
 
 
 # Main generation functions
@@ -348,16 +401,15 @@ def generate_single_season(
 
     E_edges, E_centers, E_widths = make_energy_bins(n_bins, E_min, E_max)
 
-    if truth_model == "power_law":
-        mu_signal = signal_power_law(E_centers, phi, gamma, E_widths)
-    elif truth_model == "broken_power_law":
-        mu_signal = signal_broken_power_law(
-            E_centers, phi, gamma, gamma2, E_break, E_widths
-        )
-    elif truth_model == "cutoff":
-        mu_signal = signal_cutoff(E_centers, phi, gamma, E_cut, E_widths)
-    else:
-        raise ValueError(f"Unknown truth model: {truth_model}")
+    signal_params = {
+        "phi": phi,
+        "gamma": gamma,
+        "gamma1": gamma,
+        "gamma2": gamma2,
+        "E_break": E_break,
+        "E_cut": E_cut,
+    }
+    mu_signal = signal_counts_for_model(E_centers, E_widths, truth_model, signal_params)
 
     # background at true-energy level
     mu_background_true = background_atmospheric(
@@ -468,9 +520,8 @@ def generate_hierarchical(
     K = 10,
     mu_phi = np.log(1e-5),
     sigma_phi = 0.3,
-    mu_eta = -39.14394658089878,
-    sigma_eta = 1,
     gamma = 2.5,
+    eta = 1e-5,
     delta = 3.7,
     truth_model = "power_law",
     n_bins = 20,
@@ -499,15 +550,13 @@ def generate_hierarchical(
     # draw season specific fluxes
     log_phi_k = rng.normal(mu_phi, sigma_phi, size=K)
     phi_k = np.exp(log_phi_k)
-    log_eta_k = rng.normal(mu_eta, sigma_eta, size=K)
-    eta_k = np.exp(log_eta_k)
-    
+
     seasons = []
     for k in range(K):
         ds = generate_single_season(
             phi=phi_k[k],
             gamma=gamma,
-            eta=eta_k[k],
+            eta=eta,
             delta=delta,
             truth_model=truth_model,
             n_bins=n_bins,
@@ -521,9 +570,8 @@ def generate_hierarchical(
     true_params = {
         "mu_phi": mu_phi,
         "sigma_phi": sigma_phi,
-        "mu_eta": mu_eta,
-        "sigma_eta": sigma_eta,
         "gamma": gamma,
+        "eta": eta,
         "delta": delta,
         "truth_model": truth_model,
         "K": K,
@@ -533,7 +581,6 @@ def generate_hierarchical(
         seasons=seasons,
         true_params=true_params,
         phi_k=phi_k,
-        eta_k=eta_k
     )
 
 
@@ -620,9 +667,8 @@ if __name__ == "__main__":
         K=int(hier_cfg["K"]),
         mu_phi=float(hier_cfg["mu_phi"]),
         sigma_phi=float(hier_cfg["sigma_phi"]),
-        mu_eta=float(hier_cfg["mu_eta"]),
-        sigma_eta=float(hier_cfg["sigma_eta"]),
         gamma=float(hier_cfg["gamma"]),
+        eta=float(hier_cfg["eta"]),
         delta=float(hier_cfg["delta"]),
         truth_model=hier_cfg["truth_model"],
         n_bins=int(bins_cfg["n_bins"]),
@@ -653,9 +699,10 @@ if __name__ == "__main__":
         hese75_sky_factor_sr=float(det_cfg.get("hese75_sky_factor_sr", 4.0 * np.pi)),
         rng=rng,
     )
-    print(f"\nShared params: gamma={hds.true_params['gamma']}, delta={hds.true_params['delta']}")
-    print(f"Phi population: mu_phi={hds.true_params['mu_phi']:.2f}, sigma_phi={hds.true_params['sigma_phi']:.2f}")
-    print(f"Eta population: mu_eta={hds.true_params['mu_eta']:.2f}, sigma_eta={hds.true_params['sigma_eta']:.2f}")
+    print(f"\nShared params: gamma={hds.true_params['gamma']}, "
+          f"eta={hds.true_params['eta']:.2e}, delta={hds.true_params['delta']}")
+    print(f"Population: mu_phi={hds.true_params['mu_phi']:.2f}, "
+          f"sigma_phi={hds.true_params['sigma_phi']:.2f}")
     print(f"Season fluxes phi_k: {hds.phi_k}")
     print(f"\nPer season total counts:")
     for k, season in enumerate(hds.seasons):
