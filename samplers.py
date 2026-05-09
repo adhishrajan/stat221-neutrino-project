@@ -4,8 +4,9 @@ Pls check correctness
 Here we implement RWMH, MALA. And provide trace plots, Rhat, ESS, Autocorrelation
 """
 
+from __future__ import annotations
+
 import numpy as np
-import pandas as pd
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -65,7 +66,10 @@ def run_rwmh(
 
     # init
     theta = theta_init.copy()
-    lp = log_posterior_fn(theta)
+    try:
+        lp = log_posterior_fn(theta)
+    except (OverflowError, FloatingPointError, ValueError):
+        lp = -np.inf
     if not np.isfinite(lp):
         raise ValueError(f"Initial log posterior is not finite")
 
@@ -81,7 +85,10 @@ def run_rwmh(
         theta_proposed = theta + epsilon
 
         # evaluate
-        lp_proposed = log_posterior_fn(theta_proposed)
+        try:
+            lp_proposed = log_posterior_fn(theta_proposed)
+        except (OverflowError, FloatingPointError, ValueError):
+            lp_proposed = -np.inf
 
         # accept/reject
         log_alpha = lp_proposed - lp
@@ -189,7 +196,10 @@ def run_mala(
     log_posts = np.zeros(n_iterations)
 
     theta = theta_init.copy()
-    lp = log_posterior_fn(theta)
+    try:
+        lp = log_posterior_fn(theta)
+    except (OverflowError, FloatingPointError, ValueError):
+        lp = -np.inf
     grad = grad_log_posterior_fn(theta)
 
     if not np.isfinite(lp):
@@ -258,7 +268,10 @@ def run_mala(
             theta_proposed = mean_fwd + np.sqrt(eps) * (chol_precond @ z)
 
         # evaluate at proposal
-        lp_proposed = log_posterior_fn(theta_proposed)
+        try:
+            lp_proposed = log_posterior_fn(theta_proposed)
+        except (OverflowError, FloatingPointError, ValueError):
+            lp_proposed = -np.inf
 
         if np.isfinite(lp_proposed):
             grad_proposed = grad_log_posterior_fn(theta_proposed)
@@ -398,6 +411,7 @@ def run_multiple_chains(sampler_fn, theta_init: np.ndarray, n_chains: int = 4, i
         rng = np.random.default_rng()
 
     results = []
+    verbose = bool(sampler_kwargs.pop("verbose", False))
 
     for chain_id in range(n_chains):
         if init_strategy == "same":
@@ -413,7 +427,7 @@ def run_multiple_chains(sampler_fn, theta_init: np.ndarray, n_chains: int = 4, i
         result = sampler_fn(
             theta_init=theta0,
             rng=chain_rng,
-            verbose=True,
+            verbose=verbose,
             **sampler_kwargs,
         )
         results.append(result)
@@ -549,6 +563,12 @@ def posterior_summary_multi(results: list[MCMCResult], ci: float = 0.90, true_va
         elif name == "log_eta_prompt":
             x = np.exp(x)
             display_name = "eta_prompt"
+        elif name == "log_E_break":
+            x = np.exp(x)
+            display_name = "E_break"
+        elif name == "log_E_cut":
+            x = np.exp(x)
+            display_name = "E_cut"
         else:
             display_name = name
     
@@ -656,43 +676,6 @@ def print_diagnostics_multi(results_by_sampler: dict[str, list[MCMCResult]], ci:
                 f"{_fmt(s['ci_upper']):>12}"
             )
 
-def diagnostics_dataframe(results_by_sampler: dict[str, list[MCMCResult]]) -> dict[str, pd.DataFrame]:
-    """
-    Returns three DataFrames (ESS, ESS/s, Rhat), each indexed by sampler name
-    with one column per parameter plus metadata columns (n_chains, accept_rate, wall_time_s).
-    """
-    first_results = next(iter(results_by_sampler.values()))
-    param_names = first_results[0].param_names
-    d = first_results[0].samples.shape[1]
-
-    ess_rows, ess_per_s_rows, rhat_rows = [], [], []
-
-    for sampler_name, results in results_by_sampler.items():
-        stacked = _stack_chains(results)
-        mean_accept = float(np.mean([r.acceptance_rate for r in results]))
-        total_time = float(np.sum([r.wall_time for r in results]))
-
-        ess_vals = [effective_sample_size_multi(stacked[:, :, j]) for j in range(d)]
-        rhat_vals = [split_rhat(stacked[:, :, j]) for j in range(d)]
-
-        base = {"sampler": sampler_name, "n_chains": len(results),
-                "accept_rate": mean_accept, "wall_time_s": total_time}
-
-        ess_rows.append({**base, **{name: ess for name, ess in zip(param_names, ess_vals)}})
-        ess_per_s_rows.append({**base, **{name: ess / total_time for name, ess in zip(param_names, ess_vals)}})
-        rhat_rows.append({**base, **{name: rhat for name, rhat in zip(param_names, rhat_vals)}})
-
-    def _make_df(rows):
-        df = pd.DataFrame(rows).set_index("sampler")
-        return df
-
-    return {
-        "ess": _make_df(ess_rows),
-        "ess_per_s": _make_df(ess_per_s_rows),
-        "rhat": _make_df(rhat_rows),
-    }
-
-
 # saves traceplots for each sampler, showing traces for each chain for each parameter
 def save_traceplots_multi(results: list[MCMCResult], filename: str) -> None:
     stacked = _stack_chains(results)
@@ -715,6 +698,60 @@ def save_traceplots_multi(results: list[MCMCResult], filename: str) -> None:
     fig.tight_layout()
     fig.savefig(filename, dpi=200, bbox_inches="tight")
     plt.close(fig)
+
+
+def numerical_gradient(logp_fn: Callable[[np.ndarray], float], eps: float = 1e-5) -> Callable[[np.ndarray], np.ndarray]:
+    def _g(theta: np.ndarray) -> np.ndarray:
+        grad = np.zeros_like(theta, dtype=float)
+        for j in range(theta.size):
+            e = np.zeros_like(theta)
+            e[j] = eps
+            fp = logp_fn(theta + e)
+            fm = logp_fn(theta - e)
+            if np.isfinite(fp) and np.isfinite(fm):
+                grad[j] = (fp - fm) / (2.0 * eps)
+            else:
+                grad[j] = 0.0
+        return grad
+    return _g
+
+
+def build_spectral_logpost_and_grad(ds, recover_model: str, prior_type: str, eps: float = 1e-5):
+    infer_prompt_eta = bool(ds.model_options.get("infer_prompt_eta", False))
+    from posteriors import (
+        get_spectral_param_layout as _get_spectral_param_layout,
+        log_posterior_spectral as _log_posterior_spectral,
+    )
+    names = _get_spectral_param_layout(recover_model, infer_prompt_eta)
+
+    def _lp(theta: np.ndarray) -> float:
+        return _log_posterior_spectral(
+            theta,
+            ds.counts,
+            ds.E_centers,
+            ds.E_widths,
+            recover_model=recover_model,
+            prior_type=prior_type,
+            model_options=ds.model_options,
+        )
+
+    return _lp, numerical_gradient(_lp, eps=eps), names
+
+
+def make_theta_init_for_model(ds, recover_model: str, names: list[str], signal_cfg: dict) -> np.ndarray:
+    vals: dict[str, float] = {
+        "log_phi": np.log(ds.true_params["phi"]),
+        "gamma": ds.true_params["gamma"],
+        "gamma1": ds.true_params["gamma"],
+        "gamma2": ds.true_params.get("gamma2", float(signal_cfg["gamma2"])),
+        "log_E_break": np.log(ds.true_params.get("E_break", float(signal_cfg["E_break"]))),
+        "log_E_cut": np.log(ds.true_params.get("E_cut", float(signal_cfg["E_cut"]))),
+        "log_eta": np.log(ds.true_params["eta"]),
+        "delta": ds.true_params["delta"],
+    }
+    if "eta_prompt" in ds.true_params:
+        vals["log_eta_prompt"] = np.log(ds.true_params["eta_prompt"])
+    return np.array([vals[n] for n in names], dtype=float)
 
 # test
 if __name__ == "__main__":
@@ -776,25 +813,10 @@ if __name__ == "__main__":
           f"Signal: {ds.mu_signal.sum():.0f}, "
           f"Background: {ds.mu_background.sum():.0f}")
 
-    infer_prompt_eta = bool(ds.model_options.get("infer_prompt_eta", False))
-    if infer_prompt_eta:
-        param_names = ["log_phi", "gamma", "log_eta", "delta", "log_eta_prompt"]
-        theta_true = np.array([
-            np.log(ds.true_params["phi"]),
-            ds.true_params["gamma"],
-            np.log(ds.true_params["eta"]),
-            ds.true_params["delta"],
-            np.log(ds.true_params["eta_prompt"]),
-        ])
-    else:
-        param_names = ["log_phi", "gamma", "log_eta", "delta"]
-        theta_true = np.array([
-            np.log(ds.true_params["phi"]),
-            ds.true_params["gamma"],      
-            np.log(ds.true_params["eta"]),
-            ds.true_params["delta"],      
-        ])
+    recover_model = test_cfg.get("recover_model", ds.true_params["truth_model"])
+    prior_type = config["priors"]["default"]
 
+    infer_prompt_eta = bool(ds.model_options.get("infer_prompt_eta", False))
     true_values = {
         "phi": ds.true_params["phi"],
         "gamma": ds.true_params["gamma"],
@@ -803,30 +825,61 @@ if __name__ == "__main__":
     }
     if infer_prompt_eta:
         true_values["eta_prompt"] = ds.true_params["eta_prompt"]
-    print(f"True params, (transformed) are {theta_true}")
+    if "gamma2" in ds.true_params:
+        true_values["gamma2"] = ds.true_params["gamma2"]
+    if "E_break" in ds.true_params:
+        true_values["E_break"] = ds.true_params["E_break"]
+    if "E_cut" in ds.true_params:
+        true_values["E_cut"] = ds.true_params["E_cut"]
 
+    if recover_model == "power_law":
+        if infer_prompt_eta:
+            param_names = ["log_phi", "gamma", "log_eta", "delta", "log_eta_prompt"]
+            theta_true = np.array([
+                np.log(ds.true_params["phi"]),
+                ds.true_params["gamma"],
+                np.log(ds.true_params["eta"]),
+                ds.true_params["delta"],
+                np.log(ds.true_params["eta_prompt"]),
+            ])
+        else:
+            param_names = ["log_phi", "gamma", "log_eta", "delta"]
+            theta_true = np.array([
+                np.log(ds.true_params["phi"]),
+                ds.true_params["gamma"],
+                np.log(ds.true_params["eta"]),
+                ds.true_params["delta"],
+            ])
 
-    prior_type = config["priors"]["default"]
-    
-    def log_post(theta):
-        return log_posterior_base(
-            theta,
-            ds.counts,
-            ds.E_centers,
-            ds.E_widths,
-            prior_type,
-            model_options=ds.model_options,
+        def log_post(theta):
+            return log_posterior_base(
+                theta,
+                ds.counts,
+                ds.E_centers,
+                ds.E_widths,
+                prior_type,
+                model_options=ds.model_options,
+            )
+
+        def grad_log_post(theta):
+            return grad_log_posterior_base(
+                theta,
+                ds.counts,
+                ds.E_centers,
+                ds.E_widths,
+                prior_type,
+                model_options=ds.model_options,
+            )
+    else:
+        lp_fn, grad_fn, param_names = build_spectral_logpost_and_grad(
+            ds, recover_model=recover_model, prior_type=prior_type, eps=1e-5
         )
+        theta_true = make_theta_init_for_model(ds, recover_model, param_names, signal_cfg)
+        log_post = lp_fn
+        grad_log_post = grad_fn
 
-    def grad_log_post(theta):
-        return grad_log_posterior_base(
-            theta,
-            ds.counts,
-            ds.E_centers,
-            ds.E_widths,
-            prior_type,
-            model_options=ds.model_options,
-        )
+    print(f"Recover model: {recover_model}")
+    print(f"True params (transformed init): {theta_true}")
 
     theta_init = theta_true.copy()
 
@@ -892,20 +945,4 @@ if __name__ == "__main__":
     print("\nSaved traceplots to:")
     print(f"  {test_cfg['traceplot_rwmh']}")
     print(f"  {test_cfg['traceplot_mala']}")
-
-    # save posterior summaries as DataFrames
-    for sampler_name, results in [("RWMH", rwmh_results), ("MALA", mala_results)]:
-        summary = posterior_summary_multi(results, true_values=true_values)
-        df = pd.DataFrame(summary).T
-        path = test_cfg.get(f"posterior_summary_base_{test_cfg["truth_model"]}_{prior_type}_{sampler_name.lower()}", f"stats/posterior_summary_base_cutoff_{prior_type}_{sampler_name.lower()}.csv")
-        df.to_csv(path)
-        print(f"Saved {sampler_name} posterior summary to {path}")
-
-    # save diagnostics tables as DataFrames
-    truth_model = test_cfg["truth_model"]
-    diag = diagnostics_dataframe({"RWMH": rwmh_results, "MALA": mala_results})
-    for table_name, df in diag.items():
-        path = f"stats/diagnostics_{table_name}_{test_cfg["truth_model"]}_{prior_type}.csv"
-        df.to_csv(path)
-        print(f"Saved {table_name} diagnostics to {path}")
     
