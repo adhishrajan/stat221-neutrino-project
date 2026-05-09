@@ -260,8 +260,11 @@ def log_posterior_spectral(
         lp += p["log_E_break"]
     if recover_model == "cutoff":
         lp += p["log_E_cut"]
-    mu = expected_counts_spectral(E, E_widths, recover_model, p, model_options=model_options)
-    if np.any((mu <= 0) & (counts > 0)):
+    try:
+        mu = expected_counts_spectral(E, E_widths, recover_model, p, model_options=model_options)
+    except (OverflowError, FloatingPointError, ValueError):
+        return -np.inf
+    if not np.all(np.isfinite(mu)) or np.any((mu <= 0) & (counts > 0)):
         return -np.inf
     lp += poisson_log_likelihood(counts, mu)
     return float(lp)

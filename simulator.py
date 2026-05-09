@@ -30,16 +30,18 @@ def signal_broken_power_law(E, phi, gamma1, gamma2, E_break, E_widths) -> np.nda
     """
     Broken power law, slope gamma1 below E_break, gamma2 above.
     """
-    E_norm = E / E_REF
-    E_break_norm = E_break / E_REF
-    # phi * E_break_norm^{-gamma1} = A * E_break_norm^{-gamma2} for continuity
-    A = phi * E_break_norm**(gamma2 - gamma1)
-    mu = np.where(
+    E_norm       = E / E_REF
+    log_E_norm   = np.log(np.maximum(E_norm, 1e-300))
+    log_phi      = np.log(max(phi, 1e-300))
+    log_Eb_norm  = np.log(max(E_break / E_REF, 1e-300))
+    # log A = log phi + (gamma2 - gamma1) * log(E_break / E_REF)
+    log_A        = log_phi + (gamma2 - gamma1) * log_Eb_norm
+    log_mu = np.where(
         E < E_break,
-        phi * E_norm**(-gamma1),
-        A * E_norm**(-gamma2)
+        log_phi - gamma1 * log_E_norm,
+        log_A   - gamma2 * log_E_norm,
     )
-    return mu * E_widths
+    return np.exp(np.clip(log_mu, -500, 500)) * E_widths
 
 
 def signal_cutoff(E, phi, gamma, E_cut, E_widths) -> np.ndarray:
