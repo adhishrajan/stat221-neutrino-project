@@ -5,6 +5,7 @@ Here we implement RWMH, MALA. And provide trace plots, Rhat, ESS, Autocorrelatio
 """
 
 import numpy as np
+import pandas as pd
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -164,6 +165,7 @@ def run_mala(
     precond_shrinkage: float = 0.1,      # only used for dense
     precond_ridge: float = 1e-6,
     normalize_precond: bool = True,
+    log_posterior_and_grad_fn: Optional[Callable] = None,  # if provided, replaces separate log_posterior_fn + grad calls
 ) -> MCMCResult:
     """
     Uses a preconditioning matrix M to improve the geometry of MALA gradients
@@ -189,8 +191,11 @@ def run_mala(
     log_posts = np.zeros(n_iterations)
 
     theta = theta_init.copy()
-    lp = log_posterior_fn(theta)
-    grad = grad_log_posterior_fn(theta)
+    if log_posterior_and_grad_fn is not None:
+        lp, grad = log_posterior_and_grad_fn(theta)
+    else:
+        lp = log_posterior_fn(theta)
+        grad = grad_log_posterior_fn(theta)
 
     if not np.isfinite(lp):
         raise ValueError("Initial log posterior is not finite")
@@ -257,11 +262,16 @@ def run_mala(
             mean_fwd = theta + 0.5 * eps * (precond @ grad)
             theta_proposed = mean_fwd + np.sqrt(eps) * (chol_precond @ z)
 
-        # evaluate at proposal
-        lp_proposed = log_posterior_fn(theta_proposed)
+        # evaluate at proposal (combined call avoids computing _component_terms twice)
+        if log_posterior_and_grad_fn is not None:
+            lp_proposed, grad_proposed = log_posterior_and_grad_fn(theta_proposed)
+        else:
+            lp_proposed = log_posterior_fn(theta_proposed)
+            grad_proposed = None
 
         if np.isfinite(lp_proposed):
-            grad_proposed = grad_log_posterior_fn(theta_proposed)
+            if grad_proposed is None:
+                grad_proposed = grad_log_posterior_fn(theta_proposed)
 
             if precond_type == "diag":
                 diff_fwd = theta_proposed - mean_fwd
@@ -530,47 +540,68 @@ def transform_hierarchical_samples(stacked: np.ndarray, parameterization: str, K
     """
     parameterization: "centered" or "noncentered"
     K: number of seasons
-    latent_display: how to display phi parameters
-        - "raw": show raw sampled coords
-            centered -> log_phi_k
-            noncentered -> z_k
-        - "log_phi": always show log_phi_k
-        - "phi": always show phi_k
+    latent_display: how to display per-season latent parameters
+        - "raw": raw sampled coords (log_phi_k/log_eta_k for centered; z_phi_k/z_eta_k for noncentered)
+        - "log_phi": always reconstruct and show log_phi_k and log_eta_k
+        - "phi": always reconstruct and show phi_k and eta_k
     """
     n_chains, n_samples, d = stacked.shape
+    has_prompt = d == 2 * K + 7
+    if d not in (2 * K + 6, 2 * K + 7):
+        raise ValueError(f"Unexpected hierarchical dimension d={d} for K={K}")
+    p_offset = 1 if has_prompt else 0
     out = stacked.copy()
 
     if parameterization == "centered":
-        # theta = [log_phi_1,...,log_phi_K,gamma,log_eta,delta,mu_phi,log_sigma_phi]
+        # theta = [log_phi_1,...,log_phi_K, log_eta_1,...,log_eta_K, gamma, delta, (log_eta_prompt), mu_phi, log_sigma_phi, mu_eta, log_sigma_eta]
         log_phi = stacked[:, :, :K]
+        log_eta = stacked[:, :, K:2 * K]
 
-        if latent_display == "raw" or latent_display == "log_phi":
+        if latent_display in ("raw", "log_phi"):
             out[:, :, :K] = log_phi
-            latent_names = [f"log_phi_{k+1}" for k in range(K)]
+            out[:, :, K:2 * K] = log_eta
+            phi_names = [f"log_phi_{k+1}" for k in range(K)]
+            eta_names = [f"log_eta_{k+1}" for k in range(K)]
         elif latent_display == "phi":
             out[:, :, :K] = np.exp(log_phi)
-            latent_names = [f"phi_{k+1}" for k in range(K)]
+            out[:, :, K:2 * K] = np.exp(log_eta)
+            phi_names = [f"phi_{k+1}" for k in range(K)]
+            eta_names = [f"eta_{k+1}" for k in range(K)]
         else:
             raise ValueError(f"Unknown latent_display: {latent_display}")
 
     elif parameterization == "noncentered":
-        # theta = [z_1,...,z_K,gamma,log_eta,delta,mu_phi,log_sigma_phi]
-        z = stacked[:, :, :K]
-        mu_phi = stacked[:, :, K + 3]
-        log_sigma_phi = stacked[:, :, K + 4]
-        sigma_phi = np.exp(log_sigma_phi)
+        # theta = [z_phi_1,...,z_phi_K, z_eta_1,...,z_eta_K, gamma, delta, (log_eta_prompt), mu_phi, log_sigma_phi, mu_eta, log_sigma_eta]
+        z_phi = stacked[:, :, :K]
+        z_eta = stacked[:, :, K:2 * K]
+        mu_phi_idx = 2 * K + 2 + p_offset
+        lsig_phi_idx = 2 * K + 3 + p_offset
+        mu_eta_idx = 2 * K + 4 + p_offset
+        lsig_eta_idx = 2 * K + 5 + p_offset
+        mu_phi = stacked[:, :, mu_phi_idx]
+        sigma_phi = np.exp(stacked[:, :, lsig_phi_idx])
+        mu_eta = stacked[:, :, mu_eta_idx]
+        sigma_eta = np.exp(stacked[:, :, lsig_eta_idx])
 
         if latent_display == "raw":
-            out[:, :, :K] = z
-            latent_names = [f"z_{k+1}" for k in range(K)]
+            out[:, :, :K] = z_phi
+            out[:, :, K:2 * K] = z_eta
+            phi_names = [f"z_phi_{k+1}" for k in range(K)]
+            eta_names = [f"z_eta_{k+1}" for k in range(K)]
         elif latent_display == "log_phi":
-            log_phi = mu_phi[:, :, None] + sigma_phi[:, :, None] * z
+            log_phi = mu_phi[:, :, None] + sigma_phi[:, :, None] * z_phi
+            log_eta = mu_eta[:, :, None] + sigma_eta[:, :, None] * z_eta
             out[:, :, :K] = log_phi
-            latent_names = [f"log_phi_{k+1}" for k in range(K)]
+            out[:, :, K:2 * K] = log_eta
+            phi_names = [f"log_phi_{k+1}" for k in range(K)]
+            eta_names = [f"log_eta_{k+1}" for k in range(K)]
         elif latent_display == "phi":
-            log_phi = mu_phi[:, :, None] + sigma_phi[:, :, None] * z
+            log_phi = mu_phi[:, :, None] + sigma_phi[:, :, None] * z_phi
+            log_eta = mu_eta[:, :, None] + sigma_eta[:, :, None] * z_eta
             out[:, :, :K] = np.exp(log_phi)
-            latent_names = [f"phi_{k+1}" for k in range(K)]
+            out[:, :, K:2 * K] = np.exp(log_eta)
+            phi_names = [f"phi_{k+1}" for k in range(K)]
+            eta_names = [f"eta_{k+1}" for k in range(K)]
         else:
             raise ValueError(f"Unknown latent_display: {latent_display}")
 
@@ -578,8 +609,11 @@ def transform_hierarchical_samples(stacked: np.ndarray, parameterization: str, K
         raise ValueError(f"Unknown parameterization: {parameterization}")
 
     # shared parameters
-    shared_names = ["gamma", "log_eta", "delta", "mu_phi", "log_sigma_phi"]
-    names = latent_names + shared_names
+    shared_names = ["gamma", "delta"]
+    if has_prompt:
+        shared_names.append("log_eta_prompt")
+    shared_names.extend(["mu_phi", "log_sigma_phi", "mu_eta", "log_sigma_eta"])
+    names = phi_names + eta_names + shared_names
 
     return out, names
 
@@ -747,15 +781,104 @@ def save_traceplots_multi_hierarchical(results: list[MCMCResult],filename: str,p
     fig.savefig(filename, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
+def diagnostics_dataframe_hierarchical(
+    results_by_sampler: dict[str, list[MCMCResult]],
+    parameterization: str,
+    K: int,
+    latent_display: str = "log_phi",
+) -> dict[str, pd.DataFrame]:
+    """
+    Returns three DataFrames (ESS, ESS/s, Rhat) indexed by sampler name,
+    with one column per transformed parameter plus metadata columns.
+    """
+    first_results = next(iter(results_by_sampler.values()))
+    stacked0 = _stack_chains(first_results)
+    _, param_names = transform_hierarchical_samples(
+        stacked0, parameterization=parameterization, K=K, latent_display=latent_display
+    )
+    d = len(param_names)
+
+    ess_rows, ess_per_s_rows, rhat_rows = [], [], []
+
+    for sampler_name, results in results_by_sampler.items():
+        stacked = _stack_chains(results)
+        transformed, _ = transform_hierarchical_samples(
+            stacked, parameterization=parameterization, K=K, latent_display=latent_display
+        )
+        mean_accept = float(np.mean([r.acceptance_rate for r in results]))
+        total_time = float(np.sum([r.wall_time for r in results]))
+
+        ess_vals = [effective_sample_size_multi(transformed[:, :, j]) for j in range(d)]
+        rhat_vals = [split_rhat(transformed[:, :, j]) for j in range(d)]
+
+        base = {"sampler": sampler_name, "n_chains": len(results),
+                "accept_rate": mean_accept, "wall_time_s": total_time}
+
+        ess_rows.append({**base, **{name: ess for name, ess in zip(param_names, ess_vals)}})
+        ess_per_s_rows.append({**base, **{name: ess / total_time for name, ess in zip(param_names, ess_vals)}})
+        rhat_rows.append({**base, **{name: rhat for name, rhat in zip(param_names, rhat_vals)}})
+
+    def _make_df(rows):
+        return pd.DataFrame(rows).set_index("sampler")
+
+    return {
+        "ess": _make_df(ess_rows),
+        "ess_per_s": _make_df(ess_per_s_rows),
+        "rhat": _make_df(rhat_rows),
+    }
+
+
+def posterior_summary_dataframe_hierarchical(
+    results: list[MCMCResult],
+    parameterization: str,
+    K: int,
+    latent_display: str = "log_phi",
+    ci: float = 0.90,
+    true_values: Optional[dict[str, float]] = None,
+) -> pd.DataFrame:
+    """
+    Returns a DataFrame of posterior summary statistics for the hierarchical model,
+    computed on transformed (interpretable) parameter coordinates.
+    """
+    stacked = _stack_chains(results)
+    transformed, param_names = transform_hierarchical_samples(
+        stacked, parameterization=parameterization, K=K, latent_display=latent_display
+    )
+    d = len(param_names)
+    combined = transformed.reshape(-1, d)
+
+    alpha = 1.0 - ci
+    lo = 100.0 * (alpha / 2.0)
+    hi = 100.0 * (1.0 - alpha / 2.0)
+
+    rows = []
+    for j, name in enumerate(param_names):
+        x = combined[:, j]
+        true_val = None if true_values is None else true_values.get(name, None)
+        rows.append({
+            "param": name,
+            "true": true_val,
+            "mean": float(np.mean(x)),
+            "sd": float(np.std(x, ddof=1)),
+            "median": float(np.median(x)),
+            "ci_lower": float(np.percentile(x, lo)),
+            "ci_upper": float(np.percentile(x, hi)),
+        })
+    return pd.DataFrame(rows).set_index("param")
+
+
 # test
 if __name__ == "__main__":
     from simulator import generate_hierarchical
-    from posteriors import log_posterior_hierarchical, grad_log_posterior_hierarchical
+    from posteriors import log_posterior_hierarchical, grad_log_posterior_hierarchical, make_hierarchical_fns
     from load_config import load_config
 
     config = load_config()
     test_cfg = config["testing"]
     hier_cfg = config["hierarchical"]
+    atmo_cfg = config["atmospheric_realism"]
+    det_cfg = config["detector_response"]
+    phys_prior_cfg = config["priors"]["physics"]
     rwmh_cfg = config["samplers_hierarchical"]["RWMH"]
     mala_cfg = config["samplers_hierarchical"]["MALA"]
     parameterization = test_cfg["hierarchical_parameterization"]
@@ -767,57 +890,101 @@ if __name__ == "__main__":
         K=int(hier_cfg["K"]),
         mu_phi=float(hier_cfg["mu_phi"]),
         sigma_phi=float(hier_cfg["sigma_phi"]),
+        mu_eta=float(hier_cfg["mu_eta"]),
+        sigma_eta=float(hier_cfg["sigma_eta"]),
         gamma=float(hier_cfg["gamma"]),
-        eta=float(hier_cfg["eta"]),
         delta=float(hier_cfg["delta"]),
         truth_model=hier_cfg["truth_model"],
+        atmo_model=atmo_cfg["model"],
+        prompt_fraction=float(atmo_cfg["prompt_fraction"]),
+        eta_prompt=float(config["background"].get("eta_prompt", float(config["background"]["eta"]) * float(atmo_cfg["prompt_fraction"]))),
+        delta_prompt=float(atmo_cfg["delta_prompt"]),
+        E_knee=float(atmo_cfg["E_knee"]),
+        knee_sharpness=float(atmo_cfg["knee_sharpness"]),
+        prompt_prior_log_mean=float(atmo_cfg.get("prompt_prior_log_mean", np.log(1e-6))),
+        prompt_prior_log_sd=float(atmo_cfg.get("prompt_prior_log_sd", 1.0)),
+        prior_phi_log_mean=float(phys_prior_cfg["phi_log_mean"]),
+        prior_phi_log_sd=float(phys_prior_cfg["phi_log_sd"]),
+        prior_gamma_mean=float(phys_prior_cfg["gamma_mean"]),
+        prior_gamma_sd=float(phys_prior_cfg["gamma_sd"]),
+        prior_eta_log_mean=float(phys_prior_cfg["eta_log_mean"]),
+        prior_eta_log_sd=float(phys_prior_cfg["eta_log_sd"]),
+        prior_delta_mean=float(phys_prior_cfg["delta_mean"]),
+        prior_delta_sd=float(phys_prior_cfg["delta_sd"]),
+        detector_mode=det_cfg["mode"],
+        livetime_years=float(det_cfg["livetime_years"]),
+        sigma_log10=float(det_cfg["sigma_log10"]),
+        physical_flux_units=bool(det_cfg.get("physical_flux_units", False)),
+        hese75_aeff_allsky_path=det_cfg.get("hese75_aeff_allsky_path", None),
+        hese75_migration_path=det_cfg.get("hese75_migration_path", None),
+        hese75_sky_factor_sr=float(det_cfg.get("hese75_sky_factor_sr", 4.0 * np.pi)),
         rng=rng,
     )
     K = len(ds.seasons)
-    print(f"K = {K}, True means = {ds.phi_k}")
+    print(f"K = {K}, True phi_k = {ds.phi_k}, True eta_k = {ds.eta_k}")
+
+    mu_phi_true = ds.true_params["mu_phi"]
+    sigma_phi_true = ds.true_params["sigma_phi"]
+    mu_eta_true = ds.true_params["mu_eta"]
+    sigma_eta_true = ds.true_params["sigma_eta"]
 
     if parameterization == "centered":
         print("CENTERED PARAMETERIZATION")
         param_names = [f"log_phi_{i+1}" for i in range(K)]
-        theta_true = np.log(ds.phi_k).tolist()
+        param_names += [f"log_eta_{i+1}" for i in range(K)]
+        theta_true = np.log(ds.phi_k).tolist() + np.log(ds.eta_k).tolist()
         latent_truth = {f"log_phi_{k+1}": np.log(ds.phi_k[k]) for k in range(K)}
+        latent_truth.update({f"log_eta_{k+1}": np.log(ds.eta_k[k]) for k in range(K)})
     elif parameterization == "noncentered":
         print("NONCENTERED PARAMETERIZATION")
-        param_names = [f"z_{i+1}" for i in range(K)]
-        z_true = (np.log(ds.phi_k) - ds.true_params["mu_phi"]) / ds.true_params["sigma_phi"]
-        theta_true = z_true.tolist()
-        latent_truth = {f"z_{k+1}": z_true[k] for k in range(K)}
+        param_names = [f"z_phi_{i+1}" for i in range(K)]
+        param_names += [f"z_eta_{i+1}" for i in range(K)]
+        z_phi_true = (np.log(ds.phi_k) - mu_phi_true) / sigma_phi_true
+        z_eta_true = (np.log(ds.eta_k) - mu_eta_true) / sigma_eta_true
+        theta_true = z_phi_true.tolist() + z_eta_true.tolist()
+        latent_truth = {f"z_phi_{k+1}": z_phi_true[k] for k in range(K)}
+        latent_truth.update({f"z_eta_{k+1}": z_eta_true[k] for k in range(K)})
     else:
         raise ValueError(f"Unknown parameterization: {parameterization}")
 
-    param_names.extend(["gamma", "log_eta", "delta", "mu_phi", "log_sigma_phi"])
+    infer_prompt_eta = bool(ds.seasons[0].model_options.get("infer_prompt_eta", False))
+    param_names.extend(["gamma", "delta"])
+    if infer_prompt_eta:
+        param_names.append("log_eta_prompt")
+    param_names.extend(["mu_phi", "log_sigma_phi", "mu_eta", "log_sigma_eta"])
     theta_true.extend([
         ds.true_params["gamma"],
-        np.log(ds.true_params["eta"]),
         ds.true_params["delta"],
-        ds.true_params["mu_phi"],
-        np.log(ds.true_params["sigma_phi"]),
+    ])
+    if infer_prompt_eta:
+        theta_true.append(np.log(ds.seasons[0].true_params["eta_prompt"]))
+    theta_true.extend([
+        mu_phi_true,
+        np.log(sigma_phi_true),
+        mu_eta_true,
+        np.log(sigma_eta_true),
     ])
     theta_true = np.array(theta_true)
-    print(f"True params, (transformed) are {theta_true}")
+    print(f"True params (transformed): {theta_true}")
 
     true_values = {
         **latent_truth,
         **{f"log_phi_{k+1}": np.log(ds.phi_k[k]) for k in range(K)},
+        **{f"log_eta_{k+1}": np.log(ds.eta_k[k]) for k in range(K)},
         "gamma": ds.true_params["gamma"],
-        "log_eta": np.log(ds.true_params["eta"]),
         "delta": ds.true_params["delta"],
-        "mu_phi": ds.true_params["mu_phi"],
-        "log_sigma_phi": np.log(ds.true_params["sigma_phi"]),
+        **({"log_eta_prompt": np.log(ds.seasons[0].true_params["eta_prompt"])} if infer_prompt_eta else {}),
+        "mu_phi": mu_phi_true,
+        "log_sigma_phi": np.log(sigma_phi_true),
+        "mu_eta": mu_eta_true,
+        "log_sigma_eta": np.log(sigma_eta_true),
     }
 
     prior_type = config["priors"]["default"]
 
-    def log_post(theta):
-        return log_posterior_hierarchical(theta, ds.seasons, parameterization, prior_type)
-
-    def grad_log_post(theta):
-        return grad_log_posterior_hierarchical(theta, ds.seasons, parameterization, prior_type)
+    log_post, grad_log_post, log_post_and_grad = make_hierarchical_fns(
+        ds.seasons, parameterization, prior_type
+    )
 
     rwmh_results = run_multiple_chains(
         run_rwmh,
@@ -850,6 +1017,7 @@ if __name__ == "__main__":
         rng=rng,
         log_posterior_fn=log_post,
         grad_log_posterior_fn=grad_log_post,
+        log_posterior_and_grad_fn=log_post_and_grad,
         n_iterations=int(mala_cfg["n_iterations"]),
         n_burnin=int(mala_cfg["n_burnin"]),
         step_size=float(mala_cfg["step_size"]),
@@ -864,6 +1032,13 @@ if __name__ == "__main__":
         normalize_precond=bool(mala_cfg["normalize_precond"]),
     )
 
+    print_diagnostics_multi_hierarchical(
+        {"RWMH": rwmh_results},
+        parameterization=parameterization,
+        K=K,
+        latent_display=test_cfg["latent_display_diagnostics"],
+        true_values=true_values,
+    )
     print_diagnostics_multi_hierarchical(
         {"RWMH": rwmh_results, "MALA": mala_results},
         parameterization=parameterization,
@@ -893,3 +1068,33 @@ if __name__ == "__main__":
         K=K,
         latent_display=test_cfg["latent_display_traceplots"],
     )
+
+    hier_truth_model = hier_cfg["truth_model"]
+    latent_disp = test_cfg["latent_display_diagnostics"]
+    results_by_sampler = {"RWMH": rwmh_results}
+    results_by_sampler["MALA"] = mala_results
+
+    # save posterior summaries as DataFrames
+    for sampler_name, results in results_by_sampler.items():
+        df = posterior_summary_dataframe_hierarchical(
+            results,
+            parameterization=parameterization,
+            K=K,
+            latent_display=latent_disp,
+            true_values=true_values,
+        )
+        path = f"Stats/posterior_summary_hierarchical_{hier_truth_model}_{prior_type}_{parameterization}_{sampler_name.lower()}.csv"
+        df.to_csv(path)
+        print(f"Saved {sampler_name} posterior summary to {path}")
+
+    # save diagnostics tables as DataFrames
+    diag = diagnostics_dataframe_hierarchical(
+        results_by_sampler,
+        parameterization=parameterization,
+        K=K,
+        latent_display=latent_disp,
+    )
+    for table_name, df in diag.items():
+        path = f"Stats/diagnostics_hierarchical_{table_name}_{hier_truth_model}_{prior_type}_{parameterization}.csv"
+        df.to_csv(path)
+        print(f"Saved {table_name} diagnostics to {path}")
