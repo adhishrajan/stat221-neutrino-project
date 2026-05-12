@@ -1,6 +1,6 @@
 # stat221-neutrino-project
 
-Bayesian inference for astrophysical neutrino spectra, motivated by IceCube-style binned energy observations. Observed bin counts are modelled as Poisson draws from a mixture of astrophysical signal and atmospheric background, fit spectral models via custom MCMC, and compare models using Bayes factors.
+Bayesian inference for astrophysical neutrino spectra, motivated by IceCube-style binned energy observations. Observed bin counts are modeled as Poisson draws from a mixture of astrophysical signal and atmospheric background, fit spectral models via custom MCMC, and compare models using Bayes factors.
 
 ---
 
