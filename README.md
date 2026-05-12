@@ -97,6 +97,19 @@ Runs the custom Python samplers across every combination of truth model, prior t
 
 ---
 
+### `bridge_sampling.py`
+
+Runs a bridge sampling prodcedure as outlined in Gronau et al. (2017) to estimate the marginal likelihood for Bayes Factor calculations.  
+
+**Key Components:**
+- `estimate_log_ml`: fits a multivariate Normal proposal distribution to posterior samples via second moment matching, draws `n_proposal` samples from it, then runs the iterative bridge equation until convergence; returns `(log_Z, log_Z_se)` where the standard error is estimated by bootstrapping over posterior samples
+- `_bridge_iterate`: each iteration of the loop updates log Z using the ratio of importance-weighted expectations over the posterior and proposal distributions (log-sum-exp trick used to prevent underflow)
+- `_fit_mvn_proposal`: fits the MVN proposal with a small ridge term to keep the covariance non-singular
+
+Called by `bayes_factor_base.py` and `bayes_factor_hierarchical.py`, and also directly in `Test_comprehensive_sim_study.ipynb` for the full model-selection simulation study.
+
+---
+
 ## Dependencies
 
 ```
