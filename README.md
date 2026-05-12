@@ -51,7 +51,7 @@ Custom MCMC samplers built from scratch: Random-Walk Metropolis–Hastings (RWMH
 - `run_rwmh`: adaptive RWMH; updates proposal covariance as (2.38²/d) x empirical_cov during a burn-in window (following Haario et al. 2001)
 - `run_mala`: MALA with optional dense preconditioning; adapts step size toward a target acceptance rate (≈0.60); gradient supplied by `posteriors.py`
 - `run_multiple_chains`: launches N independent chains with jittered initialization; used for all inference pipelines (default N=4)
-- `split_rhat`: split-chain R-hat (Gelman–Rubin) convergence diagnostic
+- `split_rhat`: split-chain R-hat convergence diagnostic
 - `effective_sample_size`: ESS estimate from autocorrelation
 - `plot_traceplots` / `plot_acf`: visual diagnostics
 - `MCMCResult`: dataclass returned by each sampler; carries samples, log-posteriors, acceptance rate, wall time
@@ -99,7 +99,7 @@ Runs the custom Python samplers across every combination of truth model, prior t
 
 ### `bridge_sampling.py`
 
-Runs a bridge sampling prodcedure as outlined in Gronau et al. (2017) to estimate the marginal likelihood for Bayes Factor calculations.  
+Runs a bridge sampling prodcedure as outlined in Gronau et al. 2017 to estimate the marginal log-likelihood (log Z) for Bayes Factor calculations.  
 
 **Key Components:**
 - `estimate_log_ml`: fits a multivariate Normal proposal distribution to posterior samples via second moment matching, draws `n_proposal` samples from it, then runs the iterative bridge equation until convergence; returns `(log_Z, log_Z_se)` where the standard error is estimated by bootstrapping over posterior samples
